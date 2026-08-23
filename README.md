@@ -66,6 +66,14 @@ checklist, time-blocked schedule, Notion database schemas, thumbnail/title testi
 method, and a 25-point weekly scoring framework. Start at
 [the kit README](docs/channel-operating-kit/README.md).
 
+## Anime Pipeline (multi-agent backend)
+
+[`anime_pipeline/`](anime_pipeline/) is a separate FastAPI + SQLAlchemy service for
+running a serialized anime channel with 13 specialist agents: a gated episode
+workflow, schema-enforced agent handoffs, and a computed QC model that decides
+whether an episode ships. See [its README](anime_pipeline/README.md) and the
+[design docs](docs/anime-pipeline/).
+
 ## Pipeline Structure
 
 - `llm_providers.py` - Multi-provider LLM abstraction (Ollama, Groq, Gemini)

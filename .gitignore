@@ -13,3 +13,7 @@ chatterbox_studio/history.json
 chatterbox_studio/refs.json
 !chatterbox_studio/outputs/.gitkeep
 !chatterbox_studio/refs/.gitkeep
+
+# anime_pipeline local state
+anime_pipeline/*.db
+anime_pipeline/.pytest_cache/
