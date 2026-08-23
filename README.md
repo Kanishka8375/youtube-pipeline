@@ -58,6 +58,14 @@ CONTENT_PROVIDER=ollama python pipeline.py --topic "Your Video Topic"
 
 TTS uses Edge TTS (Microsoft Edge, free). Video assembly uses MoviePy (free).
 
+## Channel Operating Kit
+
+Beyond the code, [`docs/channel-operating-kit/`](docs/channel-operating-kit/) holds the
+non-automated half of running a faceless AI-tools channel: the weekly production
+checklist, time-blocked schedule, Notion database schemas, thumbnail/title testing
+method, and a 25-point weekly scoring framework. Start at
+[the kit README](docs/channel-operating-kit/README.md).
+
 ## Pipeline Structure
 
 - `llm_providers.py` - Multi-provider LLM abstraction (Ollama, Groq, Gemini)
