@@ -116,13 +116,30 @@ def test_unregistered_name_resolves_to_nothing(client):
     assert client.get(f"/canon/entities/{SERIES}/resolve?name=Kade").json()["resolved"] is None
 
 
-def test_ambiguous_alias_raises_rather_than_picking_one(client):
-    # Silently choosing would attach facts to the wrong entity, after which
-    # they would never contradict anything.
+def test_alias_claimed_by_another_entity_is_refused_at_write(client):
+    # Ambiguity is refused when it is created, not detected later at read time.
+    # Silently choosing one would attach facts to the wrong entity, after which
+    # they would never contradict anything -- and by then the two spellings are
+    # already spread across episodes.
     make_episode(client)
     add_entity(client)
-    add_entity(client, entity_code="KADE", display_name="Kade", aliases=["Kisaragi"])
-    assert client.get(f"/canon/entities/{SERIES}/resolve?name=Kisaragi").status_code == 409
+    clash = client.post(
+        "/canon/entities",
+        json={
+            **MIRA_ENTITY,
+            "entity_code": "KADE",
+            "display_name": "Kade",
+            "aliases": ["Kisaragi"],
+        },
+    )
+    assert clash.status_code == 409, clash.text
+    assert "already claimed by" in clash.json()["detail"]
+    # The original entity is untouched and still resolves.
+    resolved = client.get(f"/canon/entities/{SERIES}/resolve?name=Kisaragi").json()
+    assert resolved["resolved"]["entity_code"] == "MIRA"
+    assert [e["entity_code"] for e in client.get(f"/canon/entities/{SERIES}").json()] == [
+        "MIRA"
+    ]
 
 
 def test_duplicate_entity_code_in_a_series_is_rejected(client):

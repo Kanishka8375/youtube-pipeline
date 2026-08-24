@@ -14,9 +14,16 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
+# Optional: lets the Postgres-only tests spin up their own database. Without it
+# (or ANIME_TEST_POSTGRES_URL) those tests skip; they never fail for want of a
+# database, because the SQLite suite still covers the logic.
+postgres-tests = ["psycopg[binary]>=3.1", "testcontainers[postgres]>=4.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The app package lives at the repo-module root, not in src/.
 pythonpath = ["."]
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "postgres: needs a real Postgres; skipped when none is available",
+]

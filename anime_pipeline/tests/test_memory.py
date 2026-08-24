@@ -494,8 +494,10 @@ def test_publish_gate_reports_every_failing_check_not_just_the_first(client):
         "mandatory_fixes_closed": True,
         "no_critical_issues": False,
         "continuity_passed": False,
-        # Clear by default: nothing has recorded a blocking finding yet.
+        # Clear by default: nothing has recorded a blocking finding yet, and
+        # the episode has no timeline events to be causally impossible about.
         "enforcement_clear": True,
+        "causality_clear": True,
     }
 
 

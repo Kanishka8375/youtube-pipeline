@@ -31,6 +31,26 @@ from app.db.models import (
     Series,
     StyleBible,
 )
+from app.services.canon_registry import TimelineService
+from app.services.normalisation import normalise_fact_value
+
+#: Ordinary agent writeback. Human-approved canon outranks it; see
+#: app/services/contradiction.py:SOURCE_PRIORITY.
+DEFAULT_SOURCE_PRIORITY = 100
+
+
+def _clamped_confidence(value: Any) -> float:
+    """A writer's stated confidence, forced into 0.0-1.0.
+
+    Clamped rather than rejected: a nonsense confidence is a reason to distrust
+    one number, not to drop a fact that is otherwise complete.
+    """
+    if value is None:
+        return 1.0
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 1.0
 
 #: Which memory_type belongs to which scope. Enforced on write so a document
 #: cannot claim a scope its type does not support.
@@ -308,6 +328,9 @@ class AutoWritebackService:
         extracted: Dict[str, List[Dict[str, Any]]],
     ) -> WritebackResult:
         result = WritebackResult()
+        # Resolved once: every fact written by this pass shares the episode's
+        # timeline position, and the matcher orders by it.
+        episode_position = TimelineService(self.session).earliest_order_index(episode.id)
 
         for fact in extracted.get("canon_facts", []):
             missing = [k for k in self.REQUIRED_FACT_KEYS if k not in fact]
@@ -345,9 +368,13 @@ class AutoWritebackService:
                 entity_key=fact["entity_key"],
                 fact_key=fact["fact_key"],
                 fact_value=fact["fact_value"],
+                normalised_value=normalise_fact_value(fact["fact_value"]),
                 mutability=mutability,
                 importance=fact.get("importance", "normal"),
                 valid_from_episode_id=episode.id,
+                timeline_start_order=episode_position,
+                confidence_score=_clamped_confidence(fact.get("confidence_score")),
+                source_priority=DEFAULT_SOURCE_PRIORITY,
             )
             self.session.add(row)
             self.session.flush()
@@ -401,9 +428,12 @@ class AutoWritebackService:
                 entity_key=profile.character_code,
                 fact_key="current_status",
                 fact_value={"previous": previous, "patch": patch, "result": merged},
+                normalised_value=normalise_fact_value(merged),
                 mutability="stateful",
                 importance=update.get("importance", "normal"),
                 valid_from_episode_id=episode.id,
+                timeline_start_order=episode_position,
+                source_priority=DEFAULT_SOURCE_PRIORITY,
             )
             self.session.add(history)
             self.session.flush()
@@ -423,8 +453,11 @@ class AutoWritebackService:
                 entity_key=code,
                 fact_key="summary",
                 fact_value={"summary": hook.get("summary", "")},
+                normalised_value=normalise_fact_value(hook.get("summary", "")),
                 importance=hook.get("importance", "high"),
                 valid_from_episode_id=episode.id,
+                timeline_start_order=episode_position,
+                source_priority=DEFAULT_SOURCE_PRIORITY,
             )
             self.session.add(row)
             self.session.flush()
@@ -446,9 +479,11 @@ class AutoWritebackService:
             )
         ).all()
         closed: List[str] = []
+        end_order = TimelineService(self.session).earliest_order_index(episode.id)
         for row in rows:
             row.status = "superseded"
             row.valid_to_episode_id = episode.id
+            row.timeline_end_order = end_order
             closed.append(str(row.id))
         return closed
 

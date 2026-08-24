@@ -71,6 +71,16 @@ is the only seam.
 scores on every validation, including on read. An agent — or a hand-edited
 database row — cannot claim a passing total alongside failing sections.
 
+**5. Every gate is checked by an adversarial suite.** A gate that wrongly
+blocks generates a complaint; a gate that wrongly *passes* generates nothing at
+all. `POST /evaluation/runs` runs 18 cases against the live deployment, half of
+which assert nothing fires — because a matcher that blocks every change would
+score 100% on a suite made only of real contradictions.
+
+**6. Rewriting canon is possible, but never silent.** Contradictions still
+block. An editor unblocks one change by approving a retcon proposal that records
+who decided and why; the superseded fact is closed, not deleted.
+
 ## Endpoints
 
 | Route | Purpose |
@@ -86,6 +96,11 @@ database row — cannot claim a passing total alongside failing sections.
 | `POST /canon/validate-draft` | Guard + contradiction check over a draft |
 | `POST /canon/contradiction-check` | Proposed facts vs established canon |
 | `POST /canon/entities` · `/canon/timeline` | Registry and chronology |
+| `POST /canon/aliases` · `GET /canon/entities/{series}/suggest` | Spellings, and near misses for a human |
+| `POST /canon/timeline/rebalance` | Respace order indexes without reordering |
+| `POST /canon/causal-links` · `GET /canon/causal-check/{series}` | Cause → effect edges and their impossibilities |
+| `POST /canon/retcons` · `/retcons/{code}/approve` | File and decide a sanctioned rewrite of canon |
+| `POST /evaluation/runs` · `GET /evaluation/suite` | Run the adversarial continuity suite |
 | `GET /pipeline/stages` · `/agents` · `/qc-model` · `/diagram` | The graph, introspectable |
 | `POST /webhooks/events` · `GET /webhooks/state/{code}` | Orchestrator events |
 
@@ -97,14 +112,19 @@ database row — cannot claim a passing total alongside failing sections.
 - [Tracker schemas](../docs/anime-pipeline/04-tracker-schemas.md) — Notion / Airtable
 - [Canon memory](../docs/anime-pipeline/05-canon-memory.md) — drift prevention, consistency guard, writeback
 - [Continuity enforcement](../docs/anime-pipeline/06-continuity-enforcement.md) — registry, timeline, contradictions, the three gates
+- [Continuity hardening](../docs/anime-pipeline/07-continuity-hardening.md) — normalisation, aliases, retcon approvals, causality, the adversarial suite
 
 ## What is scaffolding
 
-One thing is deliberately unfinished, and it is marked in the source:
+Two things are deliberately unfinished, and both are marked in the source:
 
 - **No provider is wired.** `StubLLMProvider` returns canned responses so the
   orchestrator is testable. `ProviderRouter` raises
   `ProviderNotConfiguredError` rather than silently no-op'ing.
+- **The Postgres integration tests have not been observed passing.** They skip
+  when no database is available, which is the case in the environment they were
+  written in. `tests/test_postgres_integration.py` documents how to give them
+  one; everything else runs on SQLite.
 
 Everything else — schema enforcement, gating, scoring, state persistence,
 migrations — is complete and covered by tests.

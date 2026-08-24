@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -20,6 +20,7 @@ from app.db.models import (
 )
 from app.models.enums import QCStage
 from app.schemas.master_qc_report import PUBLISH_SCORE_THRESHOLD, MasterQCReport
+from app.services.canon_registry import CausalGraphService, TimelineService
 
 router = APIRouter()
 
@@ -96,6 +97,20 @@ def list_episode_qc_reports(episode_code: str, session: Session = Depends(db_ses
     return [_to_schema(row) for row in rows]
 
 
+def _causal_violations_for_episode(session: Session, episode) -> List[Dict[str, Any]]:
+    """Causal impossibilities that involve an event in this episode."""
+    event_codes = {
+        event.event_code for event in TimelineService(session).for_episode(episode.id)
+    }
+    if not event_codes:
+        return []
+    return [
+        violation.as_dict()
+        for violation in CausalGraphService(session).check(episode.series_id)
+        if event_codes.intersection(violation.events)
+    ]
+
+
 @router.get("/episode/{episode_code}/publish-gate")
 def publish_gate(episode_code: str, session: Session = Depends(db_session)):
     """Whether the latest final-cut QC report clears the episode for release."""
@@ -141,6 +156,13 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
     ).all()
     enforcement_clear = not open_issues and not open_contradictions
 
+    # Causal impossibilities are checked series-wide but only gate the episodes
+    # they involve. A loop between two events in EP07 is EP07's problem; holding
+    # every other episode's release for it would make the check something people
+    # route around rather than fix.
+    causal_violations = _causal_violations_for_episode(session, episode)
+    causality_clear = not causal_violations
+
     def _enforcement_reasons() -> List[str]:
         found = []
         if open_issues:
@@ -150,6 +172,10 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
         if open_contradictions:
             found.append(
                 f"{len(open_contradictions)} unresolved canon contradiction(s)"
+            )
+        if causal_violations:
+            found.append(
+                f"{len(causal_violations)} causal impossibility(ies) involving this episode"
             )
         return found
 
@@ -167,6 +193,7 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
                 "no_critical_issues": False,
                 "continuity_passed": continuity_passed,
                 "enforcement_clear": enforcement_clear,
+                "causality_clear": causality_clear,
             },
             "reasons": reasons,
         }
@@ -193,7 +220,12 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
         "episode_id": episode_code,
         # report.publish_ready is recomputed from the sections, never read from
         # the stored column; continuity is the one gate it does not cover.
-        "publish_ready": report.publish_ready and continuity_passed and enforcement_clear,
+        "publish_ready": (
+            report.publish_ready
+            and continuity_passed
+            and enforcement_clear
+            and causality_clear
+        ),
         "overall_score": report.overall_score,
         "anime_style_score": report.anime_style_score,
         "readiness": report.readiness,
@@ -205,6 +237,7 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
             "no_critical_issues": not report.critical_issues,
             "continuity_passed": continuity_passed,
             "enforcement_clear": enforcement_clear,
+            "causality_clear": causality_clear,
         },
         "reasons": reasons,
     }

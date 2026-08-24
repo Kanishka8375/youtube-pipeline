@@ -18,7 +18,9 @@ from app.db.models import (
     Series,
 )
 from app.services.canon_registry import (
+    AliasConflictError,
     AmbiguousEntityError,
+    CausalGraphService,
     DuplicateEntityCodeError,
     DuplicateEventCodeError,
     EntityRegistry,
@@ -30,6 +32,11 @@ from app.services.enforcement import (
     ApprovedOutputParser,
     ContinuityEnforcementService,
     UnknownComponentError,
+)
+from app.services.retcon import (
+    RetconService,
+    RetconStateError,
+    UnknownProposalError,
 )
 
 router = APIRouter()
@@ -110,6 +117,52 @@ class WritebackRequest(BaseModel):
     payload: Dict[str, Any]
 
 
+class AliasCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    series_code: str
+    entity_code: str
+    alias: str
+    source: str = "manual"
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+class RebalanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    series_code: str
+    gap: int = Field(default=10, ge=1, le=1000)
+
+
+class CausalLinkCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    series_code: str
+    cause_event_code: str
+    effect_event_code: str
+    link_type: str = "causes"
+    strength: float = Field(default=1.0, ge=0.0, le=1.0)
+    note: Optional[str] = None
+
+
+class RetconProposeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    series_code: str
+    entity_key: str
+    fact_key: str
+    proposed_value: Any
+    rationale: str = Field(min_length=1)
+    episode_code: Optional[str] = None
+
+
+class RetconDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decided_by: str = Field(min_length=1)
+    decision_note: Optional[str] = None
+
+
 # -- registry ---------------------------------------------------------------
 @router.post("/entities", status_code=status.HTTP_201_CREATED)
 def create_entity(body: EntityCreate, session: Session = Depends(db_session)):
@@ -118,7 +171,10 @@ def create_entity(body: EntityCreate, session: Session = Depends(db_session)):
         entity = EntityRegistry(session).create(
             series.id, body.model_dump(exclude={"series_code"})
         )
-    except DuplicateEntityCodeError as exc:
+    except (DuplicateEntityCodeError, AliasConflictError) as exc:
+        # 409 for both: an alias already claimed by another entity is the same
+        # kind of collision as a duplicate code, and refusing it here is what
+        # stops the ambiguity from ever reaching a resolver.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     session.commit()
     return {"entity_code": entity.entity_code, "entity_type": entity.entity_type}
@@ -355,3 +411,201 @@ def list_runs(episode_code: str, session: Session = Depends(db_session)):
         .order_by(ContinuityEnforcementRun.created_at.desc())
     ).all()
     return [_run_payload(session, r) for r in rows]
+
+
+# -- aliases ----------------------------------------------------------------
+@router.post("/aliases", status_code=status.HTTP_201_CREATED)
+def add_alias(body: AliasCreate, session: Session = Depends(db_session)):
+    """Teach the registry another spelling of a known entity."""
+    series = _series(session, body.series_code)
+    registry = EntityRegistry(session)
+    entity = registry.by_code(series.id, body.entity_code)
+    if entity is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown entity {body.entity_code!r} in series {body.series_code!r}",
+        )
+    try:
+        row = registry.add_alias(
+            entity, body.alias, source=body.source, confidence=body.confidence
+        )
+    except AliasConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{body.alias!r} normalises to nothing and cannot be used as a name",
+        )
+    session.commit()
+    return {"entity_code": entity.entity_code, "alias": row.alias}
+
+
+@router.get("/entities/{series_code}/suggest")
+def suggest_entities(series_code: str, name: str, session: Session = Depends(db_session)):
+    """Registered names close to `name`.
+
+    Suggestions only. Nothing in the pipeline acts on these -- a fuzzy match
+    that is wrong attaches a fact to the wrong entity and is invisible
+    afterwards, so the decision stays with a person.
+    """
+    series = _series(session, series_code)
+    return {
+        "query": name,
+        "suggestions": [s.as_dict() for s in EntityRegistry(session).suggest(series.id, name)],
+    }
+
+
+# -- timeline maintenance ---------------------------------------------------
+@router.post("/timeline/rebalance")
+def rebalance_timeline(body: RebalanceRequest, session: Session = Depends(db_session)):
+    """Respace order_index without changing the order, reopening insertion gaps."""
+    series = _series(session, body.series_code)
+    result = TimelineService(session).rebalance(series.id, gap=body.gap)
+    session.commit()
+    return {"series_code": body.series_code, "gap": body.gap, **result}
+
+
+# -- causality --------------------------------------------------------------
+def _event(session: Session, series: Series, event_code: str):
+    from app.db.models import TimelineEvent
+
+    row = session.scalar(
+        select(TimelineEvent).where(
+            TimelineEvent.series_id == series.id, TimelineEvent.event_code == event_code
+        )
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown timeline event {event_code!r}",
+        )
+    return row
+
+
+@router.post("/causal-links", status_code=status.HTTP_201_CREATED)
+def create_causal_link(body: CausalLinkCreate, session: Session = Depends(db_session)):
+    series = _series(session, body.series_code)
+    cause = _event(session, series, body.cause_event_code)
+    effect = _event(session, series, body.effect_event_code)
+    try:
+        CausalGraphService(session).link(
+            series_id=series.id,
+            cause=cause,
+            effect=effect,
+            link_type=body.link_type,
+            strength=body.strength,
+            note=body.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    session.commit()
+    return {
+        "cause_event_code": cause.event_code,
+        "effect_event_code": effect.event_code,
+        "link_type": body.link_type,
+    }
+
+
+@router.get("/causal-check/{series_code}")
+def causal_check(series_code: str, session: Session = Depends(db_session)):
+    """Causal impossibilities currently in the series."""
+    series = _series(session, series_code)
+    violations = CausalGraphService(session).check(series.id)
+    return {
+        "series_code": series_code,
+        "passed": not violations,
+        "violations": [v.as_dict() for v in violations],
+    }
+
+
+# -- retcons ----------------------------------------------------------------
+def _proposal_payload(proposal) -> Dict[str, Any]:
+    return {
+        "retcon_group_code": proposal.retcon_group_code,
+        "series_id": str(proposal.series_id),
+        "entity_code": proposal.entity_code,
+        "fact_key": proposal.fact_key,
+        "proposed_value": proposal.proposed_value,
+        "rationale": proposal.rationale,
+        "status": proposal.status,
+        "decided_by": proposal.decided_by,
+        "decision_note": proposal.decision_note,
+    }
+
+
+@router.post("/retcons", status_code=status.HTTP_201_CREATED)
+def propose_retcon(body: RetconProposeRequest, session: Session = Depends(db_session)):
+    """File a request to overwrite settled canon.
+
+    Filing does not unblock anything. Only an approval does, and only for the
+    exact change proposed.
+    """
+    series = _series(session, body.series_code)
+    episode = resolve_episode(session, body.episode_code) if body.episode_code else None
+    if episode is not None and episode.series_id != series.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Episode {body.episode_code!r} is not in series {body.series_code!r}",
+        )
+    proposal = RetconService(session).propose(
+        series=series,
+        entity_key=body.entity_key,
+        fact_key=body.fact_key,
+        proposed_value=body.proposed_value,
+        rationale=body.rationale,
+        episode=episode,
+    )
+    session.commit()
+    return _proposal_payload(proposal)
+
+
+@router.get("/retcons/{series_code}")
+def list_retcons(
+    series_code: str,
+    retcon_status: Optional[str] = None,
+    session: Session = Depends(db_session),
+):
+    series = _series(session, series_code)
+    try:
+        rows = RetconService(session).for_series(series.id, status=retcon_status)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return [_proposal_payload(r) for r in rows]
+
+
+def _decide(session: Session, group_code: str, body: RetconDecisionRequest, approve: bool):
+    service = RetconService(session)
+    try:
+        proposal = service.by_group_code(group_code)
+    except UnknownProposalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    try:
+        action = service.approve if approve else service.reject
+        outcome = action(
+            proposal, decided_by=body.decided_by, decision_note=body.decision_note
+        )
+    except RetconStateError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    session.commit()
+    return outcome.as_dict()
+
+
+@router.post("/retcons/{group_code}/approve")
+def approve_retcon(
+    group_code: str, body: RetconDecisionRequest, session: Session = Depends(db_session)
+):
+    """Accept a rewrite: supersede the old fact and record who decided."""
+    return _decide(session, group_code, body, approve=True)
+
+
+@router.post("/retcons/{group_code}/reject")
+def reject_retcon(
+    group_code: str, body: RetconDecisionRequest, session: Session = Depends(db_session)
+):
+    return _decide(session, group_code, body, approve=False)
