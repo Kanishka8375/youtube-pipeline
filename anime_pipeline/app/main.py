@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import os
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
 from app.agents.registry import AGENTS
@@ -67,6 +70,20 @@ app = FastAPI(title="Anime Channel Agent Backend", version="0.1.0", lifespan=lif
 
 # Outermost: every log line and every queued job carries the request's id.
 app.add_middleware(CorrelationIdMiddleware)
+
+# The admin UI is a separate origin. Origins come from the environment because
+# a wildcard with credentials is rejected by browsers anyway, and hardcoding
+# localhost would leave production without a way to set its own.
+_cors_origins = [o.strip() for o in os.getenv("ANIME_CORS_ORIGINS", "http://localhost:3001").split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Correlation-ID"],
+    )
 
 app.include_router(episodes.router, prefix="/episodes", tags=["episodes"])
 app.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
