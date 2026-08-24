@@ -9,15 +9,23 @@ from sqlalchemy import select
 
 from app.agents.registry import AGENTS
 from app.api.routes import (
+    auth,
     canon,
     episodes,
     evaluation,
+    generation,
+    jobs,
     memory,
     pipeline,
     qc_reports,
+    system,
     tasks,
     webhooks,
+    workspaces,
 )
+from app.api.middleware.correlation import CorrelationIdMiddleware
+from app.core.config import get_settings, require_production_secret
+from app.core.logging import configure_logging
 from app.core.database import get_engine, get_session
 from app.db.models import Agent
 
@@ -45,12 +53,20 @@ def seed_agents() -> int:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    configure_logging()
+    # Refuses to start a production deployment still signing tokens with the
+    # shipped development key. A startup crash is the only failure mode loud
+    # enough to stop that reaching real users.
+    require_production_secret(get_settings())
     get_engine()
     seed_agents()
     yield
 
 
 app = FastAPI(title="Anime Channel Agent Backend", version="0.1.0", lifespan=lifespan)
+
+# Outermost: every log line and every queued job carries the request's id.
+app.add_middleware(CorrelationIdMiddleware)
 
 app.include_router(episodes.router, prefix="/episodes", tags=["episodes"])
 app.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
@@ -59,6 +75,11 @@ app.include_router(pipeline.router, prefix="/pipeline", tags=["pipeline"])
 app.include_router(memory.router, prefix="/memory", tags=["memory"])
 app.include_router(canon.router, prefix="/canon", tags=["canon"])
 app.include_router(evaluation.router, prefix="/evaluation", tags=["evaluation"])
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
+app.include_router(workspaces.router, prefix="/workspaces", tags=["workspaces"])
+app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
+app.include_router(generation.router, prefix="/generation", tags=["generation"])
+app.include_router(system.router, prefix="/system", tags=["system"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 
 
