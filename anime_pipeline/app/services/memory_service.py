@@ -328,6 +328,16 @@ class AutoWritebackService:
                     episode=episode,
                 )
             )
+            mutability = fact.get("mutability", "immutable")
+            if mutability not in {"immutable", "stateful"}:
+                result.deferred.append(
+                    {
+                        "kind": "canon_fact",
+                        "reason": f"unknown mutability {mutability!r}",
+                        "payload": fact,
+                    }
+                )
+                continue
             row = MemoryFact(
                 memory_document_id=document.id,
                 fact_type=fact["fact_type"],
@@ -335,6 +345,7 @@ class AutoWritebackService:
                 entity_key=fact["entity_key"],
                 fact_key=fact["fact_key"],
                 fact_value=fact["fact_value"],
+                mutability=mutability,
                 importance=fact.get("importance", "normal"),
                 valid_from_episode_id=episode.id,
             )
@@ -390,6 +401,7 @@ class AutoWritebackService:
                 entity_key=profile.character_code,
                 fact_key="current_status",
                 fact_value={"previous": previous, "patch": patch, "result": merged},
+                mutability="stateful",
                 importance=update.get("importance", "normal"),
                 valid_from_episode_id=episode.id,
             )
