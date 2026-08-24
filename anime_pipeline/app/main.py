@@ -8,7 +8,16 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from app.agents.registry import AGENTS
-from app.api.routes import episodes, memory, pipeline, qc_reports, tasks, webhooks
+from app.api.routes import (
+    canon,
+    episodes,
+    evaluation,
+    memory,
+    pipeline,
+    qc_reports,
+    tasks,
+    webhooks,
+)
 from app.core.database import get_engine, get_session
 from app.db.models import Agent
 
@@ -48,6 +57,8 @@ app.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 app.include_router(qc_reports.router, prefix="/qc-reports", tags=["qc"])
 app.include_router(pipeline.router, prefix="/pipeline", tags=["pipeline"])
 app.include_router(memory.router, prefix="/memory", tags=["memory"])
+app.include_router(canon.router, prefix="/canon", tags=["canon"])
+app.include_router(evaluation.router, prefix="/evaluation", tags=["evaluation"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 
 

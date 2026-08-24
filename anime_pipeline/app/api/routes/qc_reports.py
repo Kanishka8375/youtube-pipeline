@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -13,10 +13,14 @@ from app.api.routes.episodes import resolve_episode
 from app.db.models import (
     Agent,
     ContinuityCheck,
+    ContinuityEnforcementRun,
+    ContinuityIssue,
+    ContradictionMatch,
     MasterQCReport as MasterQCReportRow,
 )
 from app.models.enums import QCStage
 from app.schemas.master_qc_report import PUBLISH_SCORE_THRESHOLD, MasterQCReport
+from app.services.canon_registry import CausalGraphService, TimelineService
 
 router = APIRouter()
 
@@ -93,6 +97,20 @@ def list_episode_qc_reports(episode_code: str, session: Session = Depends(db_ses
     return [_to_schema(row) for row in rows]
 
 
+def _causal_violations_for_episode(session: Session, episode) -> List[Dict[str, Any]]:
+    """Causal impossibilities that involve an event in this episode."""
+    event_codes = {
+        event.event_code for event in TimelineService(session).for_episode(episode.id)
+    }
+    if not event_codes:
+        return []
+    return [
+        violation.as_dict()
+        for violation in CausalGraphService(session).check(episode.series_id)
+        if event_codes.intersection(violation.events)
+    ]
+
+
 @router.get("/episode/{episode_code}/publish-gate")
 def publish_gate(episode_code: str, session: Session = Depends(db_session)):
     """Whether the latest final-cut QC report clears the episode for release."""
@@ -117,10 +135,55 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
         .order_by(ContinuityCheck.created_at.desc())
     ) is not None
 
+    # Enforcement findings and contradictions are separate from the guard's
+    # own pass/fail: an episode can hold a passing consistency check and still
+    # carry an unresolved retcon raised by a later draft validation.
+    open_issues = session.scalars(
+        select(ContinuityIssue)
+        .join(ContinuityEnforcementRun)
+        .where(
+            ContinuityEnforcementRun.episode_id == episode.id,
+            ContinuityIssue.blocking.is_(True),
+            ContinuityIssue.resolved.is_(False),
+        )
+    ).all()
+    open_contradictions = session.scalars(
+        select(ContradictionMatch).where(
+            ContradictionMatch.episode_id == episode.id,
+            ContradictionMatch.blocking.is_(True),
+            ContradictionMatch.resolved.is_(False),
+        )
+    ).all()
+    enforcement_clear = not open_issues and not open_contradictions
+
+    # Causal impossibilities are checked series-wide but only gate the episodes
+    # they involve. A loop between two events in EP07 is EP07's problem; holding
+    # every other episode's release for it would make the check something people
+    # route around rather than fix.
+    causal_violations = _causal_violations_for_episode(session, episode)
+    causality_clear = not causal_violations
+
+    def _enforcement_reasons() -> List[str]:
+        found = []
+        if open_issues:
+            found.append(
+                f"{len(open_issues)} unresolved blocking continuity issue(s)"
+            )
+        if open_contradictions:
+            found.append(
+                f"{len(open_contradictions)} unresolved canon contradiction(s)"
+            )
+        if causal_violations:
+            found.append(
+                f"{len(causal_violations)} causal impossibility(ies) involving this episode"
+            )
+        return found
+
     if row is None:
         reasons = ["no final_cut master QC report"]
         if not continuity_passed:
             reasons.append("no passing continuity check")
+        reasons.extend(_enforcement_reasons())
         return {
             "episode_id": episode_code,
             "publish_ready": False,
@@ -129,6 +192,8 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
                 "mandatory_fixes_closed": False,
                 "no_critical_issues": False,
                 "continuity_passed": continuity_passed,
+                "enforcement_clear": enforcement_clear,
+                "causality_clear": causality_clear,
             },
             "reasons": reasons,
         }
@@ -149,12 +214,18 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
         reasons.append(f"{len(report.critical_issues)} critical issue(s) outstanding")
     if not continuity_passed:
         reasons.append("no passing continuity check")
+    reasons.extend(_enforcement_reasons())
 
     return {
         "episode_id": episode_code,
         # report.publish_ready is recomputed from the sections, never read from
         # the stored column; continuity is the one gate it does not cover.
-        "publish_ready": report.publish_ready and continuity_passed,
+        "publish_ready": (
+            report.publish_ready
+            and continuity_passed
+            and enforcement_clear
+            and causality_clear
+        ),
         "overall_score": report.overall_score,
         "anime_style_score": report.anime_style_score,
         "readiness": report.readiness,
@@ -165,6 +236,8 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
             "mandatory_fixes_closed": not report.required_fixes_before_publish,
             "no_critical_issues": not report.critical_issues,
             "continuity_passed": continuity_passed,
+            "enforcement_clear": enforcement_clear,
+            "causality_clear": causality_clear,
         },
         "reasons": reasons,
     }

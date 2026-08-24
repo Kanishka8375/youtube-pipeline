@@ -523,12 +523,53 @@ class MemoryFact(Base):
     entity_key: Mapped[str] = mapped_column(sa.String(128), nullable=False)
     fact_key: Mapped[str] = mapped_column(sa.String(128), nullable=False)
     fact_value: Mapped[dict] = mapped_column(JSONColumn, nullable=False)
+    #: immutable | stateful. An immutable fact that changes is a contradiction;
+    #: a stateful one that changes is the story progressing. Without this
+    #: distinction a contradiction matcher fires on every character development
+    #: and gets switched off within a week. See app/services/contradiction.py.
+    mutability: Mapped[str] = mapped_column(
+        sa.String(16), default="immutable", server_default="immutable", nullable=False
+    )
     importance: Mapped[str] = mapped_column(sa.String(32), default="normal", nullable=False)
+    #: Canonical comparison form of `fact_value`, maintained by the service
+    #: layer. NULL means the value has no flat form and must be compared raw;
+    #: see app/services/normalisation.py.
+    normalised_value: Mapped[Optional[str]] = mapped_column(sa.String(512), index=True)
     valid_from_episode_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         sa.ForeignKey("episodes.id", ondelete="SET NULL")
     )
     valid_to_episode_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         sa.ForeignKey("episodes.id", ondelete="SET NULL")
+    )
+    #: Timeline positions of `valid_from` / `valid_to`, denormalised so the
+    #: matcher can order facts without a per-fact timeline query. Derived, never
+    #: caller-set: TimelineService owns them and resyncs on every rebalance.
+    timeline_start_order: Mapped[Optional[int]] = mapped_column(sa.Integer, index=True)
+    timeline_end_order: Mapped[Optional[int]] = mapped_column(sa.Integer)
+    #: Set when this fact was written to replace an earlier one. Together with
+    #: `is_retcon` it makes a rewritten past auditable instead of invisible.
+    supersedes_fact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("memory_facts.id", ondelete="SET NULL")
+    )
+    #: True only when an approved RetconProposal created this fact. Agents
+    #: cannot set it: a self-declared retcon would let any draft opt out of the
+    #: check it is supposed to face.
+    is_retcon: Mapped[bool] = mapped_column(
+        sa.Boolean, default=False, server_default=sa.false(), nullable=False
+    )
+    #: Shared by every fact written under one approved retcon, so a rewrite
+    #: spanning several facts can be reviewed and reverted as one unit.
+    retcon_group_code: Mapped[Optional[str]] = mapped_column(sa.String(128), index=True)
+    #: 0.0-1.0. How sure the writer is. Feeds contradiction severity: a
+    #: high-confidence fact contradicted by a low-confidence one is a smaller
+    #: problem than two confident facts disagreeing.
+    confidence_score: Mapped[float] = mapped_column(
+        sa.Float, default=1.0, server_default="1.0", nullable=False
+    )
+    #: Higher wins. Human-approved canon outranks agent output, which outranks
+    #: inference. See app/services/contradiction.py:SOURCE_PRIORITY.
+    source_priority: Mapped[int] = mapped_column(
+        sa.Integer, default=100, server_default="100", nullable=False
     )
     status: Mapped[str] = mapped_column(sa.String(32), default="active", nullable=False)
     created_at: Mapped[datetime] = _created()
@@ -639,6 +680,371 @@ class ContinuityCheck(Base):
         sa.ForeignKey("agents.id", ondelete="SET NULL")
     )
     created_at: Mapped[datetime] = _created()
+
+
+class CanonicalEntity(Base):
+    """One source-of-truth record for a named thing in the series.
+
+    Exists so that "MIRA", "Mira" and "Mira Kisaragi" resolve to the same
+    entity. Facts key off `entity_code`; without a registry to normalise
+    through, two agents spelling a name differently create two parallel canons
+    that never contradict each other because they never meet.
+
+    Scoped per series: two shows may both have a MIRA, and a global unique
+    constraint would make the second one unnameable.
+    """
+
+    __tablename__ = "canonical_entities"
+    __table_args__ = (sa.UniqueConstraint("series_id", "entity_code"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("series.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entity_code: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    #: character | location | object | faction | creature | technology | concept
+    entity_type: Mapped[str] = mapped_column(sa.String(64), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    aliases: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    tags: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(sa.Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(sa.String(32), default="active", nullable=False)
+    is_canonical: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
+    version: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+    alias_rows: Mapped[List["EntityAlias"]] = relationship(
+        back_populates="entity", cascade="all, delete-orphan"
+    )
+
+
+class EntityAlias(Base):
+    """One spelling that resolves to a canonical entity.
+
+    Why a table and not the `aliases` JSON column alone: the unique constraint.
+    With aliases in JSON, two entities can both claim "Kisaragi" and nothing
+    stops it -- the clash is only discovered later, at read time, by a resolver
+    that then has to refuse. Here the second write fails, at the moment someone
+    can still fix it, and resolution is a single indexed lookup instead of a
+    scan over every entity in the series.
+
+    `CanonicalEntity.aliases` remains as the display list; `EntityRegistry` is
+    the only writer of either and keeps them in step.
+    """
+
+    __tablename__ = "entity_aliases"
+    __table_args__ = (
+        sa.UniqueConstraint("series_id", "alias_normalised"),
+        sa.Index("ix_entity_aliases_lookup", "series_id", "alias_normalised"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("series.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("canonical_entities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    #: As written, for display and for explaining a match to a human.
+    alias: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    #: normalise_alias(alias) -- the column actually matched against.
+    alias_normalised: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    #: entity_code | display_name | manual | inferred
+    source: Mapped[str] = mapped_column(
+        sa.String(32), default="manual", server_default="manual", nullable=False
+    )
+    confidence: Mapped[float] = mapped_column(
+        sa.Float, default=1.0, server_default="1.0", nullable=False
+    )
+    created_at: Mapped[datetime] = _created()
+
+    entity: Mapped["CanonicalEntity"] = relationship(back_populates="alias_rows")
+
+
+class TimelineEvent(Base):
+    """One ordered event in series chronology.
+
+    `series_id` is always set, even for episode-scoped events, so a single
+    ordered read spans the whole show. `order_index` is unique per series,
+    which is what makes "ordered" a well-defined word here: without the
+    constraint two events can tie and the timeline silently differs between
+    reads.
+    """
+
+    __tablename__ = "timeline_events"
+    __table_args__ = (
+        sa.UniqueConstraint("series_id", "event_code"),
+        sa.UniqueConstraint("series_id", "order_index"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    event_code: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("series.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    season_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("seasons.id", ondelete="CASCADE")
+    )
+    episode_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="CASCADE"), index=True
+    )
+    order_index: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    title: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    involved_entity_codes: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    fact_refs: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    is_canonical: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(sa.String(32), default="active", nullable=False)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class TimelineCausalLink(Base):
+    """A directed cause -> effect edge between two timeline events.
+
+    Chronology alone cannot catch "the ritual that sealed the gate happens
+    after the gate is already sealed". Ordering says both events exist and one
+    precedes the other; only a stated causal edge makes the impossibility
+    checkable -- an effect ordered at or before its cause, or a cycle of causes
+    with no first link.
+    """
+
+    __tablename__ = "timeline_causal_links"
+    __table_args__ = (
+        sa.UniqueConstraint("series_id", "cause_event_id", "effect_event_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("series.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    cause_event_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("timeline_events.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    effect_event_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("timeline_events.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: causes | enables | prevents. `prevents` is the one edge whose effect is
+    #: expected *not* to occur, so it is checked in the opposite direction.
+    link_type: Mapped[str] = mapped_column(
+        sa.String(32), default="causes", server_default="causes", nullable=False
+    )
+    strength: Mapped[float] = mapped_column(
+        sa.Float, default=1.0, server_default="1.0", nullable=False
+    )
+    note: Mapped[Optional[str]] = mapped_column(sa.Text)
+    created_at: Mapped[datetime] = _created()
+
+
+class RetconProposal(Base):
+    """A request to overwrite settled canon, and its editorial decision.
+
+    Retcons are legitimate -- shows revise their own past on purpose. What is
+    not legitimate is a draft doing it silently. This table is the difference:
+    the contradiction still blocks, and an editor unblocks it by approving a
+    proposal that records who decided, when, and why.
+    """
+
+    __tablename__ = "retcon_proposals"
+    __table_args__ = (
+        sa.Index("ix_retcon_proposals_open", "series_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("series.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    episode_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="SET NULL"), index=True
+    )
+    #: Canonical entity code, already normalised through the registry.
+    entity_code: Mapped[str] = mapped_column(sa.String(128), nullable=False, index=True)
+    fact_key: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    proposed_value: Mapped[dict] = mapped_column(JSONColumn, nullable=False)
+    #: normalise_fact_value(proposed_value); NULL when the value has no flat
+    #: form. Matched against a draft's proposed fact so an approval covers the
+    #: same change however it is spelled next time.
+    proposed_normalised_value: Mapped[Optional[str]] = mapped_column(sa.String(512), index=True)
+    existing_fact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("memory_facts.id", ondelete="SET NULL")
+    )
+    rationale: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    #: pending | approved | rejected
+    status: Mapped[str] = mapped_column(
+        sa.String(32), default="pending", server_default="pending", nullable=False
+    )
+    #: Shared by the proposal and every fact its approval writes.
+    retcon_group_code: Mapped[str] = mapped_column(sa.String(128), nullable=False, unique=True)
+    decided_by: Mapped[Optional[str]] = mapped_column(sa.String(128))
+    decided_at: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True))
+    decision_note: Mapped[Optional[str]] = mapped_column(sa.Text)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class ContinuityEnforcementRun(Base):
+    """One recorded enforcement pass: preflight, draft validation or writeback."""
+
+    __tablename__ = "continuity_enforcement_runs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    episode_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="CASCADE"), index=True
+    )
+    task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("agents.id", ondelete="SET NULL")
+    )
+    run_type: Mapped[str] = mapped_column(sa.String(64), nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    source_ref: Mapped[Optional[str]] = mapped_column(sa.String(255))
+    input_payload: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    #: Memory codes and versions the run read, not the bundle itself. The whole
+    #: bundle carries every character profile and the style bible; storing it
+    #: per run would balloon the table while answering the same question.
+    memory_provenance: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    passed: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
+    summary: Mapped[Optional[str]] = mapped_column(sa.String(500))
+    created_at: Mapped[datetime] = _created()
+
+    issues: Mapped[List["ContinuityIssue"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class ContinuityIssue(Base):
+    """One finding from an enforcement run."""
+
+    __tablename__ = "continuity_issues"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("continuity_enforcement_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    issue_type: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(sa.String(32), nullable=False)
+    entity_type: Mapped[Optional[str]] = mapped_column(sa.String(64))
+    entity_key: Mapped[Optional[str]] = mapped_column(sa.String(128))
+    title: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    description: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    recommendation: Mapped[Optional[str]] = mapped_column(sa.Text)
+    evidence_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    blocking: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
+    resolved: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+    run: Mapped[ContinuityEnforcementRun] = relationship(back_populates="issues")
+
+
+class ContradictionMatch(Base):
+    """A proposed fact that conflicts with established canon."""
+
+    __tablename__ = "contradiction_matches"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    episode_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="CASCADE"), index=True
+    )
+    source_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("continuity_enforcement_runs.id", ondelete="SET NULL")
+    )
+    entity_code: Mapped[Optional[str]] = mapped_column(sa.String(128), index=True)
+    fact_key: Mapped[Optional[str]] = mapped_column(sa.String(128))
+    proposed_fact_json: Mapped[dict] = mapped_column(JSONColumn, nullable=False)
+    existing_fact_json: Mapped[dict] = mapped_column(JSONColumn, nullable=False)
+    #: immutable_fact_changed | retcon | duplicate_entity
+    contradiction_type: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(sa.String(32), default="high", nullable=False)
+    #: 0-100. The band in `severity` is what a human reads; this is what a
+    #: queue sorts by, so the worst contradiction in a batch of forty is the
+    #: one on top rather than whichever happened to be written first.
+    severity_score: Mapped[int] = mapped_column(
+        sa.Integer, default=0, server_default="0", nullable=False
+    )
+    explanation: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    blocking: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
+    resolved: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
+    resolution_note: Mapped[Optional[str]] = mapped_column(sa.Text)
+    #: Set when an editor filed a retcon proposal for this contradiction.
+    #: An approved proposal is what turns "you rewrote canon" into "canon was
+    #: rewritten on purpose, here is who signed off".
+    retcon_proposal_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("retcon_proposals.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = _created()
+
+
+class AgentEvalRun(Base):
+    """One execution of a benchmark suite against the continuity system.
+
+    The point is regression, not a grade. A suite of adversarial cases that
+    passes today and fails after a refactor is the only thing that tells you a
+    gate stopped gating -- and a gate that silently stops gating is
+    indistinguishable, from the outside, from a gate with nothing to catch.
+    """
+
+    __tablename__ = "agent_eval_runs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_code: Mapped[str] = mapped_column(sa.String(128), unique=True, nullable=False)
+    suite_code: Mapped[str] = mapped_column(sa.String(128), nullable=False, index=True)
+    #: What was evaluated: a service name, an agent code, a model identifier.
+    target: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    #: running | passed | failed
+    status: Mapped[str] = mapped_column(
+        sa.String(32), default="running", server_default="running", nullable=False
+    )
+    total_cases: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    passed_cases: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    failed_cases: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    pass_rate: Mapped[float] = mapped_column(
+        sa.Float, default=0.0, server_default="0.0", nullable=False
+    )
+    #: Failures grouped by category, so a report says "every alias case broke"
+    #: rather than listing nine unrelated-looking failures.
+    summary_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    started_at: Mapped[datetime] = _created()
+    finished_at: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True))
+
+    case_results: Mapped[List["AgentEvalCaseResult"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class AgentEvalCaseResult(Base):
+    """The outcome of one benchmark case."""
+
+    __tablename__ = "agent_eval_case_results"
+    __table_args__ = (sa.UniqueConstraint("run_id", "case_code"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("agent_eval_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    case_code: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    category: Mapped[str] = mapped_column(sa.String(64), nullable=False, index=True)
+    #: False for a case whose whole point is that the system must *not* fire.
+    #: Tracked separately because a system that blocks everything scores 100%
+    #: on a suite made only of things that should block.
+    expects_block: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
+    expectation_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    observed_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    passed: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
+    failure_reason: Mapped[Optional[str]] = mapped_column(sa.Text)
+    duration_ms: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+    run: Mapped[AgentEvalRun] = relationship(back_populates="case_results")
 
 
 class MasterQCReport(Base):
