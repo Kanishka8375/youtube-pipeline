@@ -22,6 +22,7 @@ from app.services.generation.providers.base import (
     ProviderCallError,
     ProviderNotConfiguredError,
 )
+from app.services.generation.providers.media_registry import available_media_providers
 from app.services.generation.providers.registry import (
     UnknownProviderError,
     available_providers,
@@ -72,8 +73,16 @@ def get_templates():
 
 @router.get("/providers")
 def get_providers():
-    """Every provider and whether it has usable credentials right now."""
-    return {"providers": available_providers()}
+    """Every provider and whether it has usable credentials right now.
+
+    Text and media are listed separately because they are chosen separately: a
+    deployment can have a real LLM behind a mock image generator, or the other
+    way round, and collapsing them into one list would hide that.
+    """
+    return {
+        "providers": available_providers(),
+        "media_providers": available_media_providers(),
+    }
 
 
 @router.post("/preview")

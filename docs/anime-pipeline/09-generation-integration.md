@@ -137,6 +137,78 @@ unless it was recorded at the time.
 The `artifact_code` carries a random suffix, so regenerating produces a *new*
 artifact rather than overwriting the previous one. The old output is evidence.
 
+## 6. Media providers
+
+Text generation returns in seconds. Media generation takes minutes and costs
+real money per call, and those two facts shape the whole interface.
+
+`MediaProvider` therefore exposes **`submit` and `poll` as separate
+operations** rather than one blocking `generate`. A blocking call would hold a
+worker for the duration of a video render and lose the generation entirely if
+the process restarted — after it had already been paid for. The job queue drives
+the wait across separate transactions instead.
+
+`MediaResult.cost_usd` exists for the same reason. "What did this episode cost
+to make" is a question someone will ask, and it is unanswerable unless every
+call records its own price at the time. An unreported cost is `None`, never
+`0.0` — "not reported" and "free" are different facts, and flattening them makes
+a cost report quietly wrong.
+
+### MuAPI
+
+`app/services/generation/providers/muapi.py`. One endpoint in front of many
+image, video and audio models:
+
+```
+POST https://api.muapi.ai/api/v1/{model}     -> {"request_id": …}
+GET  https://api.muapi.ai/api/v1/predictions/{request_id}/result
+                                             -> {"status", "outputs", "cost"}
+```
+
+with `x-api-key` on both. Raw HTTP, for the same reason as the
+OpenAI-compatible adapter: a small stable REST surface, not a vendor whose SDK
+carries behaviour worth inheriting.
+
+Four decisions worth knowing:
+
+**The model is a URL path segment.** `flux-schnell-image`,
+`openai-sora-2-text-to-video`. That puts caller-supplied text into a URL, so
+model names are validated against a strict allowlist rather than escaped — an
+allowlist cannot be got wrong the way escaping can. A model string carrying
+`../` would otherwise reach an endpoint nobody named.
+
+**Failure is terminal, not retryable.** A retry re-runs a *paid* generation, and
+a job the service rejected usually fails again for the same reason. The budget
+is better spent on a human reading the error and changing the prompt. Insufficient
+credit (402) and a rejected key (401/403) are terminal for the same reason. Rate
+limits (429) and 5xx are retryable, because those genuinely do pass.
+
+**An unrecognised status means pending, never success.** Guessing "done" from a
+word the adapter has not seen would hand the caller an empty output list dressed
+as a finished generation. A `completed` with no outputs is likewise an error
+rather than an empty success.
+
+**Network failures are caught narrowly.** A blanket `except Exception` around the
+HTTP call would catch a `TypeError` in the adapter and report it as an
+unreachable host — which the queue treats as *retryable*, so a programming error
+would quietly burn its retry budget three times instead of failing loudly once.
+
+### Testing it
+
+`tests/test_media_providers.py` pins the behaviour against a fake transport and
+reaches nothing. The live check is `scripts/muapi_live_check.py`, deliberately
+**not** a pytest test: it needs a key and spends money, and a test suite that
+sometimes bills you is one people stop running.
+
+```bash
+export MUAPI_API_KEY=...          # never in a config row, never committed
+python scripts/muapi_live_check.py --prompt "a lighthouse at dusk"
+```
+
+The key belongs in the environment, not in a workspace config profile — which is
+why `PUT /workspaces/{slug}/config-profiles` refuses keys that look like
+credentials (§7 of document 08).
+
 ---
 
 ## Endpoints
@@ -144,20 +216,27 @@ artifact rather than overwriting the previous one. The old output is evidence.
 | Route | Purpose |
 |---|---|
 | `GET /generation/templates` | Templates and their required variables |
-| `GET /generation/providers` | Which providers are configured, and their default models |
+| `GET /generation/providers` | Text and media providers, each with its default model and whether it is configured |
 | `POST /generation/preview` | Render the real prompt, canon block and all, without spending a token |
 | `POST /generation/run` | Resolve the provider, enqueue the call |
 
 `POST /generation/preview` is the endpoint worth pointing at. Prompt bugs are
 expensive to find by inspecting outputs and cheap to find by reading the prompt.
 
+Text and media are listed separately by `GET /generation/providers`, because
+they are chosen separately: a deployment can run a real LLM behind a mock image
+generator, and one merged list would hide that.
+
 ## Configuration
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Enables the `anthropic` provider |
+| `ANTHROPIC_API_KEY` | Enables the `anthropic` text provider |
 | `ANIME_ANTHROPIC_MODEL` | Overrides the default model id |
 | `ANIME_OPENAI_BASE_URL` · `ANIME_OPENAI_API_KEY` · `ANIME_OPENAI_MODEL` | Any OpenAI-compatible endpoint |
+| `MUAPI_API_KEY` | Enables the `muapi` media provider |
+| `ANIME_MUAPI_MODEL` | Default endpoint/model slug (e.g. `flux-schnell-image`) |
+| `ANIME_MUAPI_BASE_URL` | Overrides the API base |
 
-With none of these set, `mock` is the only ready provider and everything still
-runs end to end.
+With none of these set, `mock` is the only ready provider on both sides and
+everything still runs end to end.

@@ -209,6 +209,19 @@ def test_preview_calls_no_provider(client):
     assert set(body) == {"template_key", "system", "prompt", "prompt_chars"}
 
 
+def test_the_providers_endpoint_lists_text_and_media_separately(client):
+    # They are chosen separately -- a deployment can run a real LLM behind a
+    # mock image generator -- so one merged list would hide the difference.
+    headers = signed_in(client, "gen5@studio.example")
+    body = client.get("/generation/providers", headers=headers).json()
+
+    assert set(body) == {"providers", "media_providers"}
+    assert "anthropic" in body["providers"]
+    assert "muapi" in body["media_providers"]
+    assert body["media_providers"]["mock"]["configured"] is True
+    assert set(body["media_providers"]["muapi"]["kinds"]) == {"image", "video", "audio"}
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------

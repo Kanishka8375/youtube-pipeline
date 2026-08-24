@@ -38,6 +38,7 @@ export ANIME_DATABASE_URL=postgresql+psycopg://user:pass@localhost/anime
 | `ANIME_CORS_ORIGINS` | `http://localhost:3001` | Comma-separated admin console origins |
 | `ANTHROPIC_API_KEY` | unset | Enables the `anthropic` provider |
 | `ANIME_OPENAI_BASE_URL` · `_API_KEY` · `_MODEL` | unset | Any OpenAI-compatible endpoint (vLLM, Ollama, Groq) |
+| `MUAPI_API_KEY` · `ANIME_MUAPI_MODEL` | unset | Enables the `muapi` image/video/audio provider |
 | `ANIME_STORAGE_PROVIDER` · `_ROOT` | `local` · `./storage` | Where generated media lands |
 
 ## Layout
@@ -168,10 +169,16 @@ works right up until two requests arrive in the same second.
 
 Marked in the source, and worth knowing before you rely on any of it:
 
-- **Only text generation is wired.** `anthropic` and any OpenAI-compatible
-  endpoint work end to end. Image, video and music providers are still
-  interfaces — `ProviderRouter` raises `ProviderNotConfiguredError` rather than
-  silently no-op'ing.
+- **Media generation is wired but not yet driven by the pipeline.** The `muapi`
+  provider implements submit-then-poll for image, video and audio, with its
+  behaviour pinned in `tests/test_media_providers.py` and a live check in
+  `scripts/muapi_live_check.py`. What does not exist yet is a job handler that
+  turns a shot plan into media calls — so nothing in the episode workflow
+  reaches it on its own.
+- **The MuAPI adapter has not been observed against the live service.** The
+  container it was written in blocks outbound HTTP, so the wire format comes
+  from the published API rather than from a call that was made. Run
+  `scripts/muapi_live_check.py` with a key before trusting it.
 - **Storage is local-disk only.** `ANIME_STORAGE_PROVIDER=local` is the only
   implementation; S3 and GCS are seams, not adapters.
 - **No YouTube upload adapter.** The pipeline ends at an approved artifact.
