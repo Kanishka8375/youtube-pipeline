@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from app.db.models import ContradictionMatch, Episode, MemoryFact
 from app.services.canon_registry import AmbiguousEntityError, EntityRegistry, TimelineService
 from app.services.normalisation import values_agree
+from app.services.series_scope import memory_document_ids_for_series
 from app.services.retcon import RetconService
 
 IMMUTABLE = "immutable"
@@ -327,9 +328,18 @@ class ContradictionMatcher:
         Existing facts may have been written under a different spelling before
         the entity was registered, so every candidate is normalised too.
         """
+        # Scoped to the series. Without this filter the query is global, and a
+        # second show whose cast happens to include a MIRA contradicts this
+        # one's canon -- entities are per-series for exactly that reason.
+        document_ids = memory_document_ids_for_series(self.session, series_id)
+        if not document_ids:
+            return []
+
         rows = self.session.scalars(
             select(MemoryFact).where(
-                MemoryFact.fact_key == fact_key, MemoryFact.status == "active"
+                MemoryFact.fact_key == fact_key,
+                MemoryFact.status == "active",
+                MemoryFact.memory_document_id.in_(document_ids),
             )
         ).all()
         matched = []

@@ -777,3 +777,97 @@ def test_blocking_enforcement_issue_blocks_publication(client):
     assert gate["publish_ready"] is False
     assert gate["checks"]["enforcement_clear"] is False
     assert any("continuity issue" in r for r in gate["reasons"])
+
+
+# ---------------------------------------------------------------------------
+# Series isolation
+# ---------------------------------------------------------------------------
+def test_canon_does_not_leak_between_series(client):
+    """Two shows may both have a MIRA, and neither contradicts the other.
+
+    `canonical_entities` is scoped per series for exactly this reason, but
+    `MemoryFact` has no series column -- it reaches one only through its
+    document's scope. A fact query that forgets to make that hop is global, and
+    a contradiction then fires against a fact from a show nobody involved has
+    heard of.
+
+    Only reproducible against a database holding more than one series, which is
+    why an isolated fixture hid it and running the admin UI against real data
+    surfaced it immediately.
+    """
+    from app.db.models import Series
+
+    make_episode(client)  # NEON_VEIL / EP01
+    add_entity(client)  # MIRA in NEON_VEIL
+
+    # A second, unrelated show whose cast also includes a MIRA.
+    other = {
+        "series_code": "OTHER_SHOW",
+        "season_code": "S01",
+        "episode_code": "OS_EP01",
+        "episode_number": 1,
+    }
+    assert client.post("/episodes/", json=other).status_code == 201
+    assert client.post(
+        "/canon/entities",
+        json={
+            "series_code": "OTHER_SHOW",
+            "entity_code": "MIRA",
+            "entity_type": "character",
+            "display_name": "Mira",
+            "aliases": [],
+        },
+    ).status_code == 201
+
+    # Establish MIRA.species in the *other* show only.
+    client.post(
+        "/memory/documents",
+        json={
+            "memory_code": "OS_MEM",
+            "memory_type": "episode_memory",
+            "episode_code": "OS_EP01",
+            "title": "other canon",
+        },
+    )
+    client.post(
+        "/canon/writeback",
+        json={
+            "episode_code": "OS_EP01",
+            "memory_code": "OS_MEM",
+            "output_type": "script",
+            "payload": {
+                "canon_facts": [
+                    {
+                        "fact_type": "canon",
+                        "entity_type": "character",
+                        "entity_key": "MIRA",
+                        "fact_key": "species",
+                        "fact_value": "oni",
+                        "mutability": "immutable",
+                    }
+                ]
+            },
+        },
+    )
+
+    # NEON_VEIL has recorded nothing about MIRA.species, so a draft setting it
+    # contradicts nothing -- the other show's fact is none of its business.
+    result = client.post(
+        "/canon/contradiction-check",
+        json={
+            "series_code": SERIES,
+            "episode_code": "EP01",
+            "proposed_facts": [
+                {
+                    "entity_type": "character",
+                    "entity_key": "MIRA",
+                    "fact_key": "species",
+                    "fact_value": "human",
+                    "mutability": "immutable",
+                }
+            ],
+        },
+    ).json()
+
+    assert result["passed"] is True, result["contradictions"]
+    assert result["contradictions_found"] == 0
