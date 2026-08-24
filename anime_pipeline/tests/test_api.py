@@ -17,6 +17,15 @@ def create_episode(client, **overrides):
     return client.post("/episodes/", json={**EPISODE, **overrides})
 
 
+def pass_continuity(client):
+    """Record a passing continuity check, a precondition of the publish gate."""
+    response = client.post(
+        "/memory/consistency-check",
+        json={"episode_code": "EP01", "script": {"scenes": []}},
+    )
+    assert response.status_code == 200 and response.json()["passed"] is True
+
+
 def test_health(client):
     assert client.get("/health").json() == {"status": "ok"}
 
@@ -102,11 +111,16 @@ def test_publish_gate_without_a_report(client):
     create_episode(client)
     body = client.get("/qc-reports/episode/EP01/publish-gate").json()
     assert body["publish_ready"] is False
-    assert body["reasons"] == ["no final_cut master QC report"]
+    # Both halves of the gate are unmet: no QC report, and no continuity check.
+    assert body["reasons"] == [
+        "no final_cut master QC report",
+        "no passing continuity check",
+    ]
 
 
 def test_a_passing_report_opens_the_publish_gate(client):
     create_episode(client)
+    pass_continuity(client)
     response = client.post("/qc-reports/", json=qc_report(score=9).model_dump(mode="json"))
     assert response.status_code == 201
     assert response.json()["overall_score"] == 90
@@ -134,6 +148,7 @@ def test_a_failing_report_keeps_the_gate_shut_and_names_the_weak_areas(client):
 
 def test_the_latest_final_cut_report_wins(client):
     create_episode(client)
+    pass_continuity(client)
     client.post(
         "/qc-reports/",
         json=qc_report(score=6, report_id="mqc_EP01_v1").model_dump(mode="json"),
@@ -162,6 +177,10 @@ def test_a_qc_report_for_an_unknown_episode_is_rejected(client):
 
 
 def test_orchestrator_events_drive_the_workflow_state(client):
+    # The episode must exist first. Workflow state is now database-backed, so an
+    # event naming an unknown episode is a 404 rather than silently conjuring
+    # state for it -- see test_events_for_an_unknown_episode_return_404.
+    create_episode(client)
     client.post("/webhooks/events", json={"event": "episode.created", "payload": {"episode_id": "EP01"}})
     state = client.get("/webhooks/state/EP01").json()
     assert state["runnable"] == ["showrunner_brief"]

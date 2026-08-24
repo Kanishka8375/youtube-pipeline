@@ -10,9 +10,13 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import db_session
 from app.api.routes.episodes import resolve_episode
-from app.db.models import Agent, MasterQCReport as MasterQCReportRow
+from app.db.models import (
+    Agent,
+    ContinuityCheck,
+    MasterQCReport as MasterQCReportRow,
+)
 from app.models.enums import QCStage
-from app.schemas.master_qc_report import MasterQCReport
+from app.schemas.master_qc_report import PUBLISH_SCORE_THRESHOLD, MasterQCReport
 
 router = APIRouter()
 
@@ -102,32 +106,66 @@ def publish_gate(episode_code: str, session: Session = Depends(db_session)):
         .order_by(MasterQCReportRow.created_at.desc())
     ).first()
 
+    # A passing continuity check is required alongside the QC score: an episode
+    # can be beautifully made and still contradict canon.
+    continuity_passed = session.scalar(
+        select(ContinuityCheck)
+        .where(
+            ContinuityCheck.episode_id == episode.id,
+            ContinuityCheck.passed.is_(True),
+        )
+        .order_by(ContinuityCheck.created_at.desc())
+    ) is not None
+
     if row is None:
+        reasons = ["no final_cut master QC report"]
+        if not continuity_passed:
+            reasons.append("no passing continuity check")
         return {
             "episode_id": episode_code,
             "publish_ready": False,
-            "reasons": ["no final_cut master QC report"],
+            "checks": {
+                "qc_score_ok": False,
+                "mandatory_fixes_closed": False,
+                "no_critical_issues": False,
+                "continuity_passed": continuity_passed,
+            },
+            "reasons": reasons,
         }
 
     report = _to_schema(row)
     reasons: List[str] = []
-    if report.overall_score < 85:
-        reasons.append(f"overall score {report.overall_score} is below the threshold of 85")
+    score_ok = report.overall_score >= PUBLISH_SCORE_THRESHOLD
+    if not score_ok:
+        reasons.append(
+            f"overall score {report.overall_score} is below the threshold of "
+            f"{PUBLISH_SCORE_THRESHOLD}"
+        )
     if report.required_fixes_before_publish:
         reasons.append(
             f"{len(report.required_fixes_before_publish)} mandatory fix(es) outstanding"
         )
     if report.critical_issues:
         reasons.append(f"{len(report.critical_issues)} critical issue(s) outstanding")
+    if not continuity_passed:
+        reasons.append("no passing continuity check")
 
     return {
         "episode_id": episode_code,
-        "publish_ready": report.publish_ready,
+        # report.publish_ready is recomputed from the sections, never read from
+        # the stored column; continuity is the one gate it does not cover.
+        "publish_ready": report.publish_ready and continuity_passed,
         "overall_score": report.overall_score,
         "anime_style_score": report.anime_style_score,
         "readiness": report.readiness,
         "final_decision": report.final_decision.value if report.final_decision else None,
         "weakest_categories": report.sections.weakest_categories(),
+        "checks": {
+            "qc_score_ok": score_ok,
+            "mandatory_fixes_closed": not report.required_fixes_before_publish,
+            "no_critical_issues": not report.critical_issues,
+            "continuity_passed": continuity_passed,
+        },
         "reasons": reasons,
     }
 

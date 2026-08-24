@@ -14,7 +14,7 @@ pick one.
 pip install -e ".[dev]"
 alembic upgrade head          # creates the schema and seeds the 13 agents
 uvicorn app.main:app --reload
-pytest                        # 75 tests, no network or database needed
+pytest                        # 125 tests, no network or database needed
 ```
 
 Defaults to SQLite so it runs with no infrastructure. Point at Postgres for
@@ -42,10 +42,10 @@ app/
   agents/       agent registry + 13 system prompts
   api/routes/   episodes, tasks, qc_reports, pipeline, webhooks
 migrations/     alembic
-tests/          75 tests
+tests/          125 tests
 ```
 
-## The three ideas worth knowing
+## The four ideas worth knowing
 
 **1. The pipeline is data, not code.** `PIPELINE` in
 `app/services/orchestrator.py` declares fifteen stages with their agents,
@@ -59,7 +59,14 @@ a provider call has been paid for. Output that fails its schema is retried once
 with the validation error fed back, then escalated — and is never stored, so a
 downstream agent cannot read a payload that broke its own contract.
 
-**3. QC scores are computed, never asserted.** `overall_score`,
+**3. Workflow state is durable and serialised.** `WorkflowState` lives in
+Postgres, not in a worker's memory. Every event is handled inside a per-episode
+`SELECT ... FOR UPDATE`, so two workers touching the same episode serialise
+instead of losing each other's writes, and an episode's progress survives a
+restart. The orchestrator itself stays database-free — `WorkflowStateRepository`
+is the only seam.
+
+**4. QC scores are computed, never asserted.** `overall_score`,
 `anime_style_score` and `publish_ready` are derived from the twelve category
 scores on every validation, including on read. An agent — or a hand-edited
 database row — cannot claim a passing total alongside failing sections.
@@ -72,6 +79,9 @@ database row — cannot claim a passing total alongside failing sections.
 | `POST /tasks/` · `POST /tasks/{code}/complete` | Task intake, schema-checked completion |
 | `POST /qc-reports/` | Submit a QC report; scores computed server-side |
 | `GET /qc-reports/episode/{code}/publish-gate` | Ship it or not, and why not |
+| `GET /memory/bundles/agent/{code}` | Everything an agent must read before working |
+| `POST /memory/consistency-check` | Audit a draft script against canon |
+| `POST /memory/writeback` | Fold an approved artifact into canon |
 | `GET /pipeline/stages` · `/agents` · `/qc-model` · `/diagram` | The graph, introspectable |
 | `POST /webhooks/events` · `GET /webhooks/state/{code}` | Orchestrator events |
 
@@ -81,17 +91,15 @@ database row — cannot claim a passing total alongside failing sections.
 - [QC framework](../docs/anime-pipeline/02-qc-framework.md) — weights, thresholds, the publish gate
 - [Anime edit checklist](../docs/anime-pipeline/03-anime-edit-checklist.md) — frame-accurate timings
 - [Tracker schemas](../docs/anime-pipeline/04-tracker-schemas.md) — Notion / Airtable
+- [Canon memory](../docs/anime-pipeline/05-canon-memory.md) — drift prevention, consistency guard, writeback
 
 ## What is scaffolding
 
-Two things are deliberately unfinished, and both are marked in the source:
+One thing is deliberately unfinished, and it is marked in the source:
 
-- **Workflow state is process-local.** `app/api/routes/webhooks.py` keeps
-  `WorkflowState` in a dict. Replace `_load_state`/`_save_state` with repository
-  calls before running more than one worker.
 - **No provider is wired.** `StubLLMProvider` returns canned responses so the
   orchestrator is testable. `ProviderRouter` raises
   `ProviderNotConfiguredError` rather than silently no-op'ing.
 
-Everything else — schema enforcement, gating, scoring, migrations — is complete
-and covered by tests.
+Everything else — schema enforcement, gating, scoring, state persistence,
+migrations — is complete and covered by tests.

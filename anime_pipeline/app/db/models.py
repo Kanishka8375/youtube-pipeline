@@ -157,6 +157,9 @@ class Episode(Base):
     scene_editor_qc_notes: Mapped[List["SceneEditorQCNote"]] = relationship(
         back_populates="episode", cascade="all, delete-orphan"
     )
+    blockers: Mapped[List["EpisodeBlocker"]] = relationship(
+        back_populates="episode", cascade="all, delete-orphan"
+    )
 
 
 class Agent(Base):
@@ -217,6 +220,10 @@ class Task(Base):
     task_code: Mapped[str] = mapped_column(sa.String(128), unique=True, nullable=False)
     task_type: Mapped[str] = mapped_column(sa.String(128), nullable=False)
     task_category: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    #: Pipeline stage this task fulfils (`PIPELINE[*].name`). Nullable because a
+    #: task may be ad hoc rather than part of the declared graph; the
+    #: orchestrator only sees tasks that name a stage.
+    stage: Mapped[Optional[str]] = mapped_column(sa.String(64), index=True)
     title: Mapped[Optional[str]] = mapped_column(sa.String(255))
     description: Mapped[Optional[str]] = mapped_column(sa.Text)
     status: Mapped[TaskStatus] = mapped_column(
@@ -277,6 +284,39 @@ class TaskDependency(Base):
 
     task: Mapped[Task] = relationship(back_populates="dependencies", foreign_keys=[task_id])
     depends_on: Mapped[Task] = relationship(foreign_keys=[depends_on_task_id])
+
+
+class EpisodeBlocker(Base):
+    """An unresolved obstacle that freezes every stage on an episode.
+
+    Stored rather than held in memory because it outlives the request that
+    raised it: a missing background asset still blocks the episode after a
+    redeploy, and every worker must see the same freeze.
+
+    Resolution is a timestamp rather than a delete, so the record of what
+    stalled an episode survives for the post-mortem.
+    """
+
+    __tablename__ = "episode_blockers"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    description: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    blocker_type: Mapped[Optional[str]] = mapped_column(sa.String(64))
+    severity: Mapped[str] = mapped_column(sa.String(32), default="medium", nullable=False)
+    raised_by_agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("agents.id", ondelete="SET NULL")
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created()
+
+    episode: Mapped["Episode"] = relationship(back_populates="blockers")
+
+    @property
+    def is_active(self) -> bool:
+        return self.resolved_at is None
 
 
 class Artifact(Base):
@@ -414,6 +454,191 @@ class AssetRequest(Base):
     updated_at: Mapped[datetime] = _updated()
 
     episode: Mapped[Episode] = relationship(back_populates="asset_requests")
+
+
+class MemoryDocument(Base):
+    """A durable block of canon, style or episode memory.
+
+    `scope_type` / `scope_id` are a deliberate polymorphic pair: a document
+    attaches to a series, a season or an episode, and no single foreign key can
+    express that. The trade is enforcement -- `scope_id` is validated by the
+    service layer, not the database -- in exchange for one table instead of
+    three near-identical ones.
+    """
+
+    __tablename__ = "memory_documents"
+    __table_args__ = (sa.Index("ix_memory_documents_scope", "scope_type", "scope_id"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    memory_code: Mapped[str] = mapped_column(sa.String(128), unique=True, nullable=False)
+    #: series_canon | season_memory | episode_memory | style_memory
+    memory_type: Mapped[str] = mapped_column(sa.String(64), nullable=False, index=True)
+    scope_type: Mapped[str] = mapped_column(sa.String(32), nullable=False)
+    scope_id: Mapped[Optional[uuid.UUID]] = mapped_column(sa.Uuid)
+    title: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    summary: Mapped[Optional[str]] = mapped_column(sa.Text)
+    content_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    version: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(sa.String(32), default="active", nullable=False)
+    source_artifact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    source_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    created_by_agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("agents.id", ondelete="SET NULL")
+    )
+    approved_by_agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("agents.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+    facts: Mapped[List["MemoryFact"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+
+
+class MemoryFact(Base):
+    """One atomic, retrievable canon fact.
+
+    Facts are the queryable half of memory: a document holds prose an agent
+    reads, a fact holds something the system can look up and compare. The
+    `valid_from` / `valid_to` episode pair is what lets a fact be superseded
+    without being erased, so "what was true at EP04" stays answerable.
+    """
+
+    __tablename__ = "memory_facts"
+    __table_args__ = (
+        sa.Index("ix_memory_facts_entity", "entity_type", "entity_key", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    memory_document_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("memory_documents.id", ondelete="CASCADE"), nullable=False
+    )
+    fact_type: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    entity_type: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    entity_key: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    fact_key: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    fact_value: Mapped[dict] = mapped_column(JSONColumn, nullable=False)
+    importance: Mapped[str] = mapped_column(sa.String(32), default="normal", nullable=False)
+    valid_from_episode_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="SET NULL")
+    )
+    valid_to_episode_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(sa.String(32), default="active", nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+    document: Mapped[MemoryDocument] = relationship(back_populates="facts")
+
+
+class CharacterProfile(Base):
+    """The consistency anchor for one character.
+
+    `character_code` is unique *per series*, not globally: two shows may both
+    have a MIRA, and a global constraint would make the second one unnameable.
+    """
+
+    __tablename__ = "character_profiles"
+    __table_args__ = (sa.UniqueConstraint("series_id", "character_code"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("series.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    character_code: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    display_name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    aliases: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    age_range: Mapped[Optional[str]] = mapped_column(sa.String(64))
+    role_type: Mapped[Optional[str]] = mapped_column(sa.String(64))
+    personality_traits: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    motivations: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    fears: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    #: See app/services/consistency_guard.py for which keys are mechanically
+    #: checkable and which are reviewer-only prose.
+    speech_style: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    relationship_map: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    visual_design: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    color_keys: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    recurring_props: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    do_not_change: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    current_status: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    canon_notes: Mapped[Optional[str]] = mapped_column(sa.Text)
+    version: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class StyleBible(Base):
+    """Editing, music and visual rules that define the show's identity."""
+
+    __tablename__ = "style_bibles"
+    __table_args__ = (
+        sa.UniqueConstraint("series_id", "style_code"),
+        # At most one active bible per series: "the active style bible" has to
+        # name exactly one row, or every agent reading it may get a different
+        # answer. Partial indexes are Postgres-only; SQLite ignores the WHERE
+        # and would reject a second inactive row, so it is applied per dialect
+        # in the migration rather than declared here.
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("series.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    style_code: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    title: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    screenplay_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    dialogue_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    editing_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    cinematography_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    music_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    sfx_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    vfx_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    pacing_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    emotional_rules: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    negative_rules: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    #: Project frame rate. Every timing rule below is meaningless without it --
+    #: see docs/anime-pipeline/03-anime-edit-checklist.md.
+    frame_rate: Mapped[float] = mapped_column(
+        sa.Float, default=24.0, nullable=False, server_default=sa.text("24.0")
+    )
+    version: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
+    is_active: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class ContinuityCheck(Base):
+    """The recorded outcome of one continuity or consistency audit."""
+
+    __tablename__ = "continuity_checks"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    check_type: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    status: Mapped[str] = mapped_column(sa.String(32), nullable=False)
+    issues: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    fixes_required: Mapped[list] = mapped_column(JSONColumn, default=list, nullable=False)
+    #: What the guard could NOT check mechanically. Carried so a pass is never
+    #: mistaken for a full clearance.
+    not_mechanically_checked: Mapped[list] = mapped_column(
+        JSONColumn, default=list, nullable=False
+    )
+    passed: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
+    checked_by_agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("agents.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = _created()
 
 
 class MasterQCReport(Base):
