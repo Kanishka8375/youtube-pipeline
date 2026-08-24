@@ -1,0 +1,22 @@
+[project]
+name = "anime-pipeline"
+version = "0.1.0"
+description = "Multi-agent backend for a serialized anime YouTube channel"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "pydantic>=2.7",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The app package lives at the repo-module root, not in src/.
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
