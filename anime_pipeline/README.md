@@ -45,7 +45,7 @@ migrations/     alembic
 tests/          75 tests
 ```
 
-## The three ideas worth knowing
+## The four ideas worth knowing
 
 **1. The pipeline is data, not code.** `PIPELINE` in
 `app/services/orchestrator.py` declares fifteen stages with their agents,
@@ -59,7 +59,14 @@ a provider call has been paid for. Output that fails its schema is retried once
 with the validation error fed back, then escalated — and is never stored, so a
 downstream agent cannot read a payload that broke its own contract.
 
-**3. QC scores are computed, never asserted.** `overall_score`,
+**3. Workflow state is durable and serialised.** `WorkflowState` lives in
+Postgres, not in a worker's memory. Every event is handled inside a per-episode
+`SELECT ... FOR UPDATE`, so two workers touching the same episode serialise
+instead of losing each other's writes, and an episode's progress survives a
+restart. The orchestrator itself stays database-free — `WorkflowStateRepository`
+is the only seam.
+
+**4. QC scores are computed, never asserted.** `overall_score`,
 `anime_style_score` and `publish_ready` are derived from the twelve category
 scores on every validation, including on read. An agent — or a hand-edited
 database row — cannot claim a passing total alongside failing sections.
@@ -84,14 +91,11 @@ database row — cannot claim a passing total alongside failing sections.
 
 ## What is scaffolding
 
-Two things are deliberately unfinished, and both are marked in the source:
+One thing is deliberately unfinished, and it is marked in the source:
 
-- **Workflow state is process-local.** `app/api/routes/webhooks.py` keeps
-  `WorkflowState` in a dict. Replace `_load_state`/`_save_state` with repository
-  calls before running more than one worker.
 - **No provider is wired.** `StubLLMProvider` returns canned responses so the
   orchestrator is testable. `ProviderRouter` raises
   `ProviderNotConfiguredError` rather than silently no-op'ing.
 
-Everything else — schema enforcement, gating, scoring, migrations — is complete
-and covered by tests.
+Everything else — schema enforcement, gating, scoring, state persistence,
+migrations — is complete and covered by tests.

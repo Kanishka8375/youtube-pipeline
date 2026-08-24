@@ -12,8 +12,18 @@ from app.db.models import Agent, Task
 from app.models.enums import TaskStatus
 from app.models.task import TaskEnvelope
 from app.schemas.registry import get_schema
+from app.services.orchestrator import PIPELINE
 
 router = APIRouter()
+
+#: task_type -> pipeline stage. Each stage declares a distinct task_type, so the
+#: mapping is unambiguous; a task_type outside the graph simply has no stage and
+#: is invisible to the orchestrator.
+_STAGE_BY_TASK_TYPE = {stage.task_type: stage.name for stage in PIPELINE}
+
+
+def _stage_for(task_type: str):
+    return _STAGE_BY_TASK_TYPE.get(task_type)
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -38,6 +48,7 @@ def create_task(envelope: TaskEnvelope, session: Session = Depends(db_session)):
         agent_id=agent.id,
         task_code=envelope.task_id,
         task_type=envelope.task_type,
+        stage=_stage_for(envelope.task_type),
         task_category=envelope.task_category.value,
         status=envelope.status,
         priority=envelope.priority,

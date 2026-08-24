@@ -133,11 +133,49 @@ contract.
 ## Where the workflow state lives
 
 `WorkflowState` in the orchestrator is a plain dataclass with no database
-dependency, which is what makes the gates unit-testable. The webhook route
-currently keeps those states in a process-local dict. **That is scaffolding, not
-production behaviour**: it is per-process and lost on restart. Replace
-`_load_state` / `_save_state` in `app/api/routes/webhooks.py` with repository
-calls before running more than one worker.
+dependency, which is what makes the gates unit-testable. Persistence lives one
+layer out, in `app/services/workflow_repository.py`, which assembles that
+dataclass from three sources and writes the mutations back:
+
+| State | Source | Written back |
+|---|---|---|
+| `tasks` | `tasks` rows for the episode with a non-null `stage` | `status`, `retry_count` |
+| `qc_reports` | newest `master_qc_reports` row per `qc_stage` | never — reports are created via `POST /qc-reports/` |
+| `blockers` | `episode_blockers` rows with `resolved_at IS NULL` | rows inserted and resolved |
+
+`tasks.stage` names the pipeline stage a task fulfils. It is set automatically
+when a task is created through `POST /tasks/`, derived from `task_type` (each
+stage declares a distinct one). A task whose `task_type` is outside the graph
+gets no stage and is invisible to the orchestrator — ad-hoc work does not gate
+the pipeline.
+
+### Concurrency
+
+Every event is handled inside `repo.locked(episode_code)`, which takes a
+`SELECT ... FOR UPDATE` on the episode row for the duration of the transaction:
+
+```
+BEGIN
+  SELECT ... FROM episodes WHERE episode_code = ? FOR UPDATE
+  load state -> orchestrator.on_event(...) -> save mutations
+COMMIT
+```
+
+Two events for the same episode therefore serialise; events for different
+episodes do not contend. Without the lock, two workers could each read
+`retry_count = 1`, each write `2`, and silently lose a retry. SQLite has no row
+locks but serialises writers at the database level, so a single-file dev or test
+database gets the same mutual exclusion.
+
+Keep the block short — orchestrator decisions only. A provider call inside the
+lock would hold the episode for the length of an LLM round trip.
+
+### Reporting QC
+
+`qc.reported` takes `master_qc_report_id` and resolves it from the database. The
+report must already exist via `POST /qc-reports/`: a report passed inline in an
+event payload would vanish on the next load, which is exactly the class of bug
+this design removes.
 
 ## n8n / LangGraph
 

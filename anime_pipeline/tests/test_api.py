@@ -162,6 +162,10 @@ def test_a_qc_report_for_an_unknown_episode_is_rejected(client):
 
 
 def test_orchestrator_events_drive_the_workflow_state(client):
+    # The episode must exist first. Workflow state is now database-backed, so an
+    # event naming an unknown episode is a 404 rather than silently conjuring
+    # state for it -- see test_events_for_an_unknown_episode_return_404.
+    create_episode(client)
     client.post("/webhooks/events", json={"event": "episode.created", "payload": {"episode_id": "EP01"}})
     state = client.get("/webhooks/state/EP01").json()
     assert state["runnable"] == ["showrunner_brief"]

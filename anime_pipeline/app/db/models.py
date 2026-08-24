@@ -157,6 +157,9 @@ class Episode(Base):
     scene_editor_qc_notes: Mapped[List["SceneEditorQCNote"]] = relationship(
         back_populates="episode", cascade="all, delete-orphan"
     )
+    blockers: Mapped[List["EpisodeBlocker"]] = relationship(
+        back_populates="episode", cascade="all, delete-orphan"
+    )
 
 
 class Agent(Base):
@@ -217,6 +220,10 @@ class Task(Base):
     task_code: Mapped[str] = mapped_column(sa.String(128), unique=True, nullable=False)
     task_type: Mapped[str] = mapped_column(sa.String(128), nullable=False)
     task_category: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    #: Pipeline stage this task fulfils (`PIPELINE[*].name`). Nullable because a
+    #: task may be ad hoc rather than part of the declared graph; the
+    #: orchestrator only sees tasks that name a stage.
+    stage: Mapped[Optional[str]] = mapped_column(sa.String(64), index=True)
     title: Mapped[Optional[str]] = mapped_column(sa.String(255))
     description: Mapped[Optional[str]] = mapped_column(sa.Text)
     status: Mapped[TaskStatus] = mapped_column(
@@ -277,6 +284,39 @@ class TaskDependency(Base):
 
     task: Mapped[Task] = relationship(back_populates="dependencies", foreign_keys=[task_id])
     depends_on: Mapped[Task] = relationship(foreign_keys=[depends_on_task_id])
+
+
+class EpisodeBlocker(Base):
+    """An unresolved obstacle that freezes every stage on an episode.
+
+    Stored rather than held in memory because it outlives the request that
+    raised it: a missing background asset still blocks the episode after a
+    redeploy, and every worker must see the same freeze.
+
+    Resolution is a timestamp rather than a delete, so the record of what
+    stalled an episode survives for the post-mortem.
+    """
+
+    __tablename__ = "episode_blockers"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("episodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    description: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    blocker_type: Mapped[Optional[str]] = mapped_column(sa.String(64))
+    severity: Mapped[str] = mapped_column(sa.String(32), default="medium", nullable=False)
+    raised_by_agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("agents.id", ondelete="SET NULL")
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created()
+
+    episode: Mapped["Episode"] = relationship(back_populates="blockers")
+
+    @property
+    def is_active(self) -> bool:
+        return self.resolved_at is None
 
 
 class Artifact(Base):
