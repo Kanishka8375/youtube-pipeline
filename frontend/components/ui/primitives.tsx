@@ -61,7 +61,12 @@ export function Pill({ children, tone = "info" }: { children: ReactNode; tone?: 
   return (
     <span
       className={clsx(
-        "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium",
+        // `shrink-0` and `whitespace-nowrap` together: inside a flex row a
+        // pill would otherwise be compressed by a long sibling until its
+        // label wrapped -- "no key" became "no / key" next to a long model
+        // line. A status label that breaks mid-phrase reads as a rendering
+        // fault, which is the opposite of what a status pill is for.
+        "inline-flex shrink-0 items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-medium",
         TONES[tone]
       )}
     >

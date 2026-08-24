@@ -49,6 +49,11 @@ export type ProviderInfo = {
   configured: boolean;
 };
 
+/** A media provider also declares which kinds it can produce. */
+export type MediaProviderInfo = ProviderInfo & {
+  kinds: string[];
+};
+
 export type AuditEntry = {
   action: string;
   entity_type: string;

@@ -13,11 +13,14 @@ import {
 } from "@/components/ui/primitives";
 import { useApi } from "@/hooks/use-api";
 import { api, ApiError } from "@/lib/api";
-import type { PromptTemplate, ProviderInfo } from "@/lib/types";
+import type { MediaProviderInfo, PromptTemplate, ProviderInfo } from "@/lib/types";
 
 export default function GenerationPage() {
   const templates = useApi<{ templates: PromptTemplate[] }>(() => api.templates());
-  const providers = useApi<{ providers: Record<string, ProviderInfo> }>(() => api.providers());
+  const providers = useApi<{
+    providers: Record<string, ProviderInfo>;
+    media_providers: Record<string, MediaProviderInfo>;
+  }>(() => api.providers());
 
   const [selected, setSelected] = useState<string | null>(null);
   const [episode, setEpisode] = useState("EP01");
@@ -41,6 +44,7 @@ export default function GenerationPage() {
   }
 
   const providerList = Object.values(providers.data?.providers ?? {});
+  const mediaList = Object.values(providers.data?.media_providers ?? {});
 
   return (
     <AppShell>
@@ -54,8 +58,11 @@ export default function GenerationPage() {
 
       <div className="grid gap-4 xl:grid-cols-[340px_1fr]">
         <div className="space-y-4">
+          {/* Text and media are listed apart because they are configured
+              apart: a deployment can run a real LLM behind a mock image
+              generator, and one merged list would hide that. */}
           <GlassPanel>
-            <h2 className="mb-3 text-sm font-semibold text-white">Providers</h2>
+            <h2 className="mb-3 text-sm font-semibold text-white">Text providers</h2>
             {providers.loading ? (
               <Skeleton rows={3} />
             ) : (
@@ -65,6 +72,32 @@ export default function GenerationPage() {
                     <div className="min-w-0">
                       <p className="truncate text-sm text-white">{p.provider_key}</p>
                       <p className="truncate text-xs text-slate-500">{p.default_model ?? "no default model"}</p>
+                    </div>
+                    <Pill tone={p.configured ? "ok" : "idle"}>
+                      {p.configured ? "ready" : "no key"}
+                    </Pill>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </GlassPanel>
+
+          <GlassPanel>
+            <h2 className="mb-1 text-sm font-semibold text-white">Media providers</h2>
+            <p className="mb-3 text-xs text-slate-500">
+              Image, video and audio. Nothing in the episode workflow calls these yet.
+            </p>
+            {providers.loading ? (
+              <Skeleton rows={2} />
+            ) : (
+              <ul className="space-y-2">
+                {mediaList.map((p) => (
+                  <li key={p.provider_key} className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm text-white">{p.provider_key}</p>
+                      <p className="truncate text-xs text-slate-500">
+                        {p.default_model ?? "no default model"} · {p.kinds.join(", ")}
+                      </p>
                     </div>
                     <Pill tone={p.configured ? "ok" : "idle"}>
                       {p.configured ? "ready" : "no key"}

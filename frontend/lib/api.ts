@@ -5,6 +5,7 @@ import type {
   Member,
   PipelineStage,
   PromptTemplate,
+  MediaProviderInfo,
   ProviderInfo,
   User,
   Workspace
@@ -105,7 +106,11 @@ export const api = {
     ),
 
   templates: () => request<{ templates: PromptTemplate[] }>("/generation/templates"),
-  providers: () => request<{ providers: Record<string, ProviderInfo> }>("/generation/providers"),
+  providers: () =>
+    request<{
+      providers: Record<string, ProviderInfo>;
+      media_providers: Record<string, MediaProviderInfo>;
+    }>("/generation/providers"),
   previewPrompt: (template_key: string, episode_code: string) =>
     request<{ template_key: string; system: string; prompt: string; prompt_chars: number }>(
       "/generation/preview",

@@ -8,7 +8,7 @@ import { SystemMap } from "@/components/motion/system-map";
 import { ErrorState, GlassPanel, Pill, SectionTitle, Skeleton } from "@/components/ui/primitives";
 import { usePolling, useApi } from "@/hooks/use-api";
 import { api } from "@/lib/api";
-import type { Job, PipelineStage, ProviderInfo } from "@/lib/types";
+import type { Job, MediaProviderInfo, PipelineStage, ProviderInfo } from "@/lib/types";
 
 function conveyorFromJobs(jobs: Job[]): ConveyorStep[] {
   const running = jobs.filter((j) => j.status === "running").length;
@@ -29,13 +29,24 @@ function conveyorFromJobs(jobs: Job[]): ConveyorStep[] {
 export default function DashboardPage() {
   const jobs = usePolling<Job[]>(() => api.jobs(), 5000);
   const stages = useApi<PipelineStage[]>(() => api.pipelineStages());
-  const providers = useApi<{ providers: Record<string, ProviderInfo> }>(() => api.providers());
+  const providers = useApi<{
+    providers: Record<string, ProviderInfo>;
+    media_providers: Record<string, MediaProviderInfo>;
+  }>(() => api.providers());
   const readiness = usePolling<Record<string, string>>(() => api.readiness(), 15000);
 
   const rows = jobs.data ?? [];
   const failed = rows.filter((j) => j.status === "failed").length;
   const active = rows.filter((j) => j.status === "running" || j.status === "retrying").length;
-  const configured = Object.values(providers.data?.providers ?? {}).filter((p) => p.configured);
+  // Text and media together: the tile answers "can this deployment actually
+  // make anything", and counting only half of it would overstate readiness.
+  // Each carries its lane because both lanes have a provider called `mock`,
+  // and an unqualified list renders as "mock, mock".
+  const allProviders = [
+    ...Object.values(providers.data?.providers ?? {}).map((p) => ({ ...p, lane: "" })),
+    ...Object.values(providers.data?.media_providers ?? {}).map((p) => ({ ...p, lane: " (media)" }))
+  ];
+  const configured = allProviders.filter((p) => p.configured);
 
   return (
     <AppShell>
@@ -64,9 +75,11 @@ export default function DashboardPage() {
         <GlassPanel>
           <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Providers ready</p>
           <p className="mt-2.5 text-3xl font-semibold tabular-nums text-white">
-            {configured.length}/{Object.keys(providers.data?.providers ?? {}).length}
+            {configured.length}/{allProviders.length}
           </p>
-          <p className="mt-1.5 text-xs text-slate-500">{configured.map((p) => p.provider_key).join(", ") || "none"}</p>
+          <p className="mt-1.5 text-xs text-slate-500">
+            {configured.map((p) => `${p.provider_key}${p.lane}`).join(", ") || "none"}
+          </p>
         </GlassPanel>
       </div>
 

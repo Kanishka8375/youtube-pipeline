@@ -75,6 +75,14 @@ try {
   // carry canon, and must distinguish fixed facts from current ones.
   await page.goto(`${BASE}/generation`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(1500);
+
+  // Both provider lanes must be on screen. The API grew `media_providers`
+  // before the console read it, so the page silently showed only half of
+  // what the deployment had -- caught by running it, not by a test.
+  const body = await page.locator('body').innerText();
+  check('text providers are listed', body.includes('Text providers'));
+  check('media providers are listed', body.includes('Media providers') && body.includes('muapi'));
+
   await page.getByRole('button', { name: /episode_script_v1/ }).click();
   await page.getByRole('button', { name: 'Preview', exact: true }).click();
   await page.waitForTimeout(2000);
