@@ -14,7 +14,7 @@ pick one.
 pip install -e ".[dev]"
 alembic upgrade head          # creates the schema and seeds the 13 agents
 uvicorn app.main:app --reload
-pytest                        # 75 tests, no network or database needed
+pytest                        # 125 tests, no network or database needed
 ```
 
 Defaults to SQLite so it runs with no infrastructure. Point at Postgres for
@@ -42,7 +42,7 @@ app/
   agents/       agent registry + 13 system prompts
   api/routes/   episodes, tasks, qc_reports, pipeline, webhooks
 migrations/     alembic
-tests/          75 tests
+tests/          125 tests
 ```
 
 ## The four ideas worth knowing
@@ -79,6 +79,9 @@ database row — cannot claim a passing total alongside failing sections.
 | `POST /tasks/` · `POST /tasks/{code}/complete` | Task intake, schema-checked completion |
 | `POST /qc-reports/` | Submit a QC report; scores computed server-side |
 | `GET /qc-reports/episode/{code}/publish-gate` | Ship it or not, and why not |
+| `GET /memory/bundles/agent/{code}` | Everything an agent must read before working |
+| `POST /memory/consistency-check` | Audit a draft script against canon |
+| `POST /memory/writeback` | Fold an approved artifact into canon |
 | `GET /pipeline/stages` · `/agents` · `/qc-model` · `/diagram` | The graph, introspectable |
 | `POST /webhooks/events` · `GET /webhooks/state/{code}` | Orchestrator events |
 
@@ -88,6 +91,7 @@ database row — cannot claim a passing total alongside failing sections.
 - [QC framework](../docs/anime-pipeline/02-qc-framework.md) — weights, thresholds, the publish gate
 - [Anime edit checklist](../docs/anime-pipeline/03-anime-edit-checklist.md) — frame-accurate timings
 - [Tracker schemas](../docs/anime-pipeline/04-tracker-schemas.md) — Notion / Airtable
+- [Canon memory](../docs/anime-pipeline/05-canon-memory.md) — drift prevention, consistency guard, writeback
 
 ## What is scaffolding
 

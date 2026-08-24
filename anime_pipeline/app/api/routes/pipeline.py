@@ -50,6 +50,6 @@ def qc_model():
     }
 
 
-@router.get("/diagram", response_class=None)
+@router.get("/diagram")
 def diagram():
     return {"format": "mermaid", "source": pipeline_mermaid()}
