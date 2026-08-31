@@ -61,6 +61,167 @@ def _updated() -> Mapped[datetime]:
     )
 
 
+class User(Base):
+    """A person who can sign in.
+
+    Everything before this commit was single-tenant and unauthenticated: any
+    caller could approve a retcon or publish an episode, and nothing recorded
+    who did. `RetconProposal.decided_by` was a free-text string precisely
+    because there was no user to point at.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    #: Stored lower-cased by AuthService; the unique index is what makes
+    #: "one account per address" true rather than merely intended.
+    email: Mapped[str] = mapped_column(sa.String(255), unique=True, nullable=False, index=True)
+    full_name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    #: PBKDF2-SHA256, salt and digest hex-encoded. Never the password.
+    password_hash: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        sa.Boolean, default=True, server_default=sa.true(), nullable=False
+    )
+    is_superuser: Mapped[bool] = mapped_column(
+        sa.Boolean, default=False, server_default=sa.false(), nullable=False
+    )
+    created_at: Mapped[datetime] = _created()
+
+    memberships: Mapped[List["WorkspaceMembership"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class Workspace(Base):
+    """A tenant boundary: one team's channels, series and episodes."""
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(sa.String(255), unique=True, nullable=False)
+    slug: Mapped[str] = mapped_column(sa.String(255), unique=True, nullable=False, index=True)
+    settings_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+    memberships: Mapped[List["WorkspaceMembership"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+
+class WorkspaceMembership(Base):
+    """One person's role in one workspace.
+
+    The unique constraint is the point: without it the same user can hold two
+    roles in one workspace, and "what may they do here" stops having an answer.
+    """
+
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (sa.UniqueConstraint("workspace_id", "user_id"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: owner | editor | member | viewer -- see app/services/auth/roles.py
+    role: Mapped[str] = mapped_column(
+        sa.String(64), default="member", server_default="member", nullable=False
+    )
+    created_at: Mapped[datetime] = _created()
+
+    workspace: Mapped[Workspace] = relationship(back_populates="memberships")
+    user: Mapped[User] = relationship(back_populates="memberships")
+
+
+class BackgroundJob(Base):
+    """A unit of deferred work, with its own retry budget.
+
+    Generation calls take tens of seconds and fail for reasons no caller can
+    fix by waiting. Running them inside the request means a timeout loses the
+    work entirely and leaves nothing to inspect; a row survives both.
+    """
+
+    __tablename__ = "background_jobs"
+    __table_args__ = (sa.Index("ix_background_jobs_runnable", "status", "scheduled_for"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    job_type: Mapped[str] = mapped_column(sa.String(128), nullable=False, index=True)
+    #: queued | running | retrying | completed | failed
+    status: Mapped[str] = mapped_column(
+        sa.String(64), default="queued", server_default="queued", nullable=False, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        sa.Integer, default=0, server_default="0", nullable=False
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        sa.Integer, default=3, server_default="3", nullable=False
+    )
+    payload_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    result_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(sa.Text)
+    #: Ties a job back to the request that queued it; see app/core/logging.py.
+    correlation_id: Mapped[Optional[str]] = mapped_column(sa.String(128), index=True)
+    workspace_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    #: When a retry becomes eligible. NULL means "now".
+    scheduled_for: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True))
+    started_at: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created()
+
+
+class AuditLog(Base):
+    """Who did what, appended and never updated.
+
+    Retcon approval and publishing are the two irreversible acts in this
+    system. `RetconProposal.decided_by` records a name on the proposal; this
+    records the act itself, so the history survives even if the proposal is
+    later deleted.
+    """
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (sa.Index("ix_audit_logs_entity", "entity_type", "entity_id"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    actor_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    workspace_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("workspaces.id", ondelete="SET NULL"), index=True
+    )
+    action: Mapped[str] = mapped_column(sa.String(128), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    entity_id: Mapped[Optional[str]] = mapped_column(sa.String(128))
+    metadata_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    correlation_id: Mapped[Optional[str]] = mapped_column(sa.String(128), index=True)
+    message: Mapped[Optional[str]] = mapped_column(sa.Text)
+    created_at: Mapped[datetime] = _created()
+
+
+class ConfigProfile(Base):
+    """Named settings, global or per-workspace.
+
+    Which LLM answers for a series is an operational choice, not a deployment
+    one. A NULL workspace_id is the global default; a workspace row overrides
+    it. Secrets never land here -- only provider and model selection.
+    """
+
+    __tablename__ = "config_profiles"
+    __table_args__ = (sa.UniqueConstraint("workspace_id", "profile_key"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    profile_key: Mapped[str] = mapped_column(sa.String(128), nullable=False, index=True)
+    profile_json: Mapped[dict] = mapped_column(JSONColumn, default=dict, nullable=False)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
 class Series(Base):
     __tablename__ = "series"
 

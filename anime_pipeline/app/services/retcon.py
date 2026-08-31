@@ -34,6 +34,7 @@ from app.db.models import (
 )
 from app.services.canon_registry import EntityRegistry, TimelineService
 from app.services.normalisation import normalise_fact_value, values_agree
+from app.services.series_scope import memory_document_ids_for_series
 
 #: Approved retcons outrank ordinary agent writeback: a human decided this
 #: one, so the next draft cannot win the same argument back on priority alone.
@@ -288,9 +289,17 @@ class RetconService:
         -- so the entity code is matched through the registry, which is what
         makes a proposal filed under an alias find the right row.
         """
+        # Same series scoping as the matcher: a proposal must never resolve to
+        # a fact belonging to a different show.
+        document_ids = memory_document_ids_for_series(self.session, series_id)
+        if not document_ids:
+            return None
+
         rows = self.session.scalars(
             select(MemoryFact).where(
-                MemoryFact.fact_key == fact_key, MemoryFact.status == "active"
+                MemoryFact.fact_key == fact_key,
+                MemoryFact.status == "active",
+                MemoryFact.memory_document_id.in_(document_ids),
             )
         ).all()
         for row in rows:
