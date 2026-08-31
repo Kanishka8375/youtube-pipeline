@@ -35,14 +35,19 @@ Build:
 The executable will be in dist/ folder.
 """
 
-from setuptools import setup, find_packages
+from setuptools import setup
 
 setup(
     name="youtube-video-generator-desktop",
     version="1.0.0",
     description="Desktop application for AI-powered YouTube video generation",
     author="Your Name",
-    packages=find_packages(),
+    # setup.py sits *inside* the package directory, so `find_packages()` looks
+    # for sub-packages of desktop_app and finds none -- installing nothing while
+    # still registering a console script that imports `desktop_app`. Map the name
+    # onto this directory explicitly instead.
+    package_dir={"desktop_app": "."},
+    packages=["desktop_app"],
     install_requires=[
         "pywebview>=4.0",
     ],
