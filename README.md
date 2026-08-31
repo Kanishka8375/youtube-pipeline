@@ -13,6 +13,11 @@ components that install and run independently** — you do not need all of them:
 
 Pick the section you need. Each is self-contained; §1 is common to all of them.
 
+> **New to the terminal?** This page assumes you are comfortable with one.
+> [**INSTALL.md**](INSTALL.md) walks through the same installations from
+> scratch — opening a terminal, installing Python, what each command does and
+> what you should see when it works.
+
 ---
 
 ## 1. Prerequisites
